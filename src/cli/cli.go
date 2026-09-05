@@ -125,6 +125,19 @@ func newApp() *cli.App {
 			Action:   sshSession,
 		},
 		{
+			Name:        "update",
+			Aliases:     []string{"upgrade"},
+			Usage:       "check for and safely install a newer croc release",
+			Description: "self-update official standalone installs; show package-manager guidance for other installs",
+			Flags: []cli.Flag{
+				&cli.BoolFlag{Name: "check", Usage: "check for a newer release without installing it"},
+				&cli.BoolFlag{Name: "yes", Usage: "install without prompting when self-update is safe"},
+				&cli.BoolFlag{Name: "register-installer", Hidden: true},
+			},
+			HelpName: "croc update",
+			Action:   updateCommand,
+		},
+		{
 			Name:        "relay",
 			Usage:       "start your own relay (optional)",
 			Description: "start relay",

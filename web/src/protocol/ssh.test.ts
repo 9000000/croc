@@ -28,6 +28,9 @@ describe("browser SSH negotiation", () => {
     for (const [name, offer] of malformed) {
       expect(() => validateSSHOffer(offer), name).toThrow();
     }
+    expect(() =>
+      validateSSHOffer({ t: "error", m: "upgrade croc to use SSH sharing" }),
+    ).toThrow("upgrade croc to use SSH sharing");
 
     const offerFrame = encodeFrame(new Uint8Array([7, 8, 9]));
     const banner = new TextEncoder().encode("SSH-2.0-Go\r\n");

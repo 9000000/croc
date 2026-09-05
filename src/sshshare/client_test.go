@@ -13,6 +13,7 @@ import (
 
 	"github.com/schollz/croc/v11/src/codephrase"
 	"github.com/schollz/croc/v11/src/comm"
+	"github.com/schollz/croc/v11/src/tcp"
 	"github.com/stretchr/testify/require"
 	"tailscale.com/types/key"
 )
@@ -59,13 +60,14 @@ func TestDetachReaderImmediateControlC(t *testing.T) {
 	require.True(t, reader.Stopped())
 }
 
-func TestJoinReconnectsAfterEOFWithFreshAuthorization(t *testing.T) {
+func TestJoinReconnectsAfterEOFButNotAfterCleanExit(t *testing.T) {
 	requests := 0
 	tailcatAttachments := 0
 	relayAttachments := 0
 	var transports []Transport
 	var clientKeys []key.NodePublic
-	var events []JoinState
+	var events []JoinEvent
+	var waits []time.Duration
 	config := ClientConfig{
 		Code:            "acid-acorn-acre-acts-ahead-alien",
 		RelayAddress:    "relay.example:9009",
@@ -74,7 +76,7 @@ func TestJoinReconnectsAfterEOFWithFreshAuthorization(t *testing.T) {
 		Reconnect:       true,
 		ReconnectWindow: time.Second,
 		OnEvent: func(event JoinEvent) {
-			events = append(events, event.State)
+			events = append(events, event)
 		},
 	}
 	err := joinWithDeps(t.Context(), config, clientDeps{
@@ -82,6 +84,9 @@ func TestJoinReconnectsAfterEOFWithFreshAuthorization(t *testing.T) {
 			requests++
 			transports = append(transports, transport)
 			clientKeys = append(clientKeys, clientKey.Public())
+			if requests == 2 {
+				return authorization{}, tcp.ErrAdmissionLimited
+			}
 			return authorization{offer: sshOffer{Role: RoleReadWrite, Transport: transport}, control: newTestControl(t)}, nil
 		},
 		attach: func(context.Context, clientSessionConfig, sshOffer, key.NodePrivate) (bool, error) {
@@ -95,16 +100,28 @@ func TestJoinReconnectsAfterEOFWithFreshAuthorization(t *testing.T) {
 			relayAttachments++
 			return true, io.EOF
 		},
+		wait: func(_ context.Context, delay time.Duration) error {
+			waits = append(waits, delay)
+			return nil
+		},
 	})
 	require.NoError(t, err)
 	require.Equal(t, 3, requests)
-	require.Equal(t, []Transport{TransportTailcat, TransportRelay, TransportTailcat}, transports)
+	require.Equal(t, []Transport{TransportTailcat, TransportTailcat, TransportTailcat}, transports)
 	require.Equal(t, 2, tailcatAttachments)
-	require.Equal(t, 1, relayAttachments)
+	require.Zero(t, relayAttachments)
 	require.Len(t, clientKeys, 3)
 	require.Equal(t, clientKeys[0], clientKeys[1])
 	require.Equal(t, clientKeys[0], clientKeys[2])
-	require.Contains(t, events, JoinStateReconnecting)
+	require.Equal(t, []time.Duration{0, 5 * time.Second}, waits)
+	require.Contains(t, events, JoinEvent{State: JoinStateReconnecting, Attempt: 1, Err: io.EOF})
+	rateLimitedReconnect := false
+	for _, event := range events {
+		if event.State == JoinStateReconnecting && event.RetryIn == 5*time.Second && errors.Is(event.Err, tcp.ErrAdmissionLimited) {
+			rateLimitedReconnect = true
+		}
+	}
+	require.True(t, rateLimitedReconnect)
 }
 
 func TestJoinFallsBackToCrocRelayBeforeFirstAttachment(t *testing.T) {
@@ -130,6 +147,60 @@ func TestJoinFallsBackToCrocRelayBeforeFirstAttachment(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, []Transport{TransportTailcat, TransportRelay}, transports)
+}
+
+func TestJoinFallbackAndRateLimitDecisions(t *testing.T) {
+	t.Run("authorization failure does not trigger fallback", func(t *testing.T) {
+		var transports []Transport
+		err := joinWithDeps(t.Context(), ClientConfig{
+			Code: "acid-acorn-acre-acts-ahead-alien", RelayAddress: "relay.example:9009",
+			RelayPassword: "pass", Input: bytes.NewReader(nil),
+		}, clientDeps{
+			request: func(_ context.Context, _, _ string, _ codephrase.SSHComponents, _ string, _ key.NodePrivate, transport Transport) (authorization, error) {
+				transports = append(transports, transport)
+				return authorization{}, tcp.ErrAdmissionLimited
+			},
+		})
+		require.ErrorIs(t, err, tcp.ErrAdmissionLimited)
+		require.ErrorContains(t, err, "relay is temporarily rate limiting")
+		require.Equal(t, []Transport{TransportTailcat}, transports)
+	})
+	t.Run("invalid offer does not trigger fallback", func(t *testing.T) {
+		requests := 0
+		attachments := 0
+		err := joinWithDeps(t.Context(), ClientConfig{
+			Code: "acid-acorn-acre-acts-ahead-alien", RelayAddress: "relay.example:9009",
+			RelayPassword: "pass", Input: bytes.NewReader(nil),
+		}, clientDeps{
+			request: func(_ context.Context, _, _ string, _ codephrase.SSHComponents, _ string, _ key.NodePrivate, _ Transport) (authorization, error) {
+				requests++
+				return authorization{offer: sshOffer{Role: RoleReadOnly, Transport: TransportRelay}, control: newTestControl(t)}, nil
+			},
+			attach: func(context.Context, clientSessionConfig, sshOffer, key.NodePrivate) (bool, error) {
+				attachments++
+				return false, errors.New("unexpected attachment")
+			},
+		})
+		require.ErrorContains(t, err, "unexpected SSH transport")
+		require.Equal(t, 1, requests)
+		require.Zero(t, attachments)
+	})
+
+	for _, test := range []struct {
+		name    string
+		attempt int
+		err     error
+		want    time.Duration
+	}{
+		{name: "first reconnect", attempt: 1, err: io.EOF},
+		{name: "later reconnect", attempt: 3, err: io.EOF, want: time.Second},
+		{name: "admission limit", attempt: 1, err: tcp.ErrAdmissionLimited, want: 5 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, reconnectDelay(test.attempt, test.err))
+		})
+	}
+	require.Equal(t, 5*time.Second, rendezvousRetryDelay(1, tcp.ErrAdmissionLimited))
 }
 
 func TestAttachRelaySSHUsesPinnedHostKey(t *testing.T) {

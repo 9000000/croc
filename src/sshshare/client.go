@@ -90,11 +90,12 @@ type joinClient struct {
 }
 
 type joinAttemptResult struct {
-	role      Role
-	transport Transport
-	offered   bool
-	connected bool
-	err       error
+	role                Role
+	transport           Transport
+	offered             bool
+	attachmentAttempted bool
+	connected           bool
+	err                 error
 }
 
 // Join authenticates an invitation, connects to its Tailcat SSH endpoint, and
@@ -191,6 +192,13 @@ func (c *joinClient) run() error {
 		if result.err == nil {
 			return nil
 		}
+		if errors.Is(result.err, ErrDetached) {
+			return ErrDetached
+		}
+		var exitErr *gossh.ExitError
+		if errors.As(result.err, &exitErr) {
+			return fmt.Errorf("shared SSH terminal ended with status %d: %w", exitErr.ExitStatus(), result.err)
+		}
 		if c.ctx.Err() != nil {
 			return c.ctx.Err()
 		}
@@ -209,8 +217,11 @@ func (c *joinClient) run() error {
 			return fmt.Errorf("SSH reconnect window expired: %w", result.err)
 		}
 		reconnectAttempt := max(attempt, 1)
-		c.emit(JoinEvent{State: JoinStateReconnecting, Attempt: reconnectAttempt, Err: result.err})
-		delay := min(time.Duration(reconnectAttempt-1)*500*time.Millisecond, 5*time.Second)
+		delay := reconnectDelay(reconnectAttempt, result.err)
+		c.emit(JoinEvent{
+			State: JoinStateReconnecting, Attempt: reconnectAttempt,
+			RetryIn: delay, Err: result.err,
+		})
 		if err := c.deps.wait(c.ctx, delay); err != nil {
 			return err
 		}
@@ -223,7 +234,8 @@ func (c *joinClient) runPreferredTransport() joinAttemptResult {
 		transport = TransportRelay
 	}
 	result := c.runTransport(transport)
-	if c.config.TransportMode != TransportModeAuto || result.err == nil || c.ctx.Err() != nil || (result.connected && !c.config.Reconnect) {
+	if c.config.TransportMode != TransportModeAuto || result.err == nil || c.ctx.Err() != nil || !result.attachmentAttempted || result.connected {
+		result.err = c.friendlyRelayError(result.err)
 		return result
 	}
 
@@ -235,12 +247,39 @@ func (c *joinClient) runPreferredTransport() joinAttemptResult {
 		relayResult.offered = true
 	}
 	if relayResult.err != nil {
+		relayErr := c.friendlyRelayError(relayResult.err)
 		relayResult.err = errors.Join(
 			fmt.Errorf("Tailcat path failed: %w", result.err),
-			fmt.Errorf("croc relay fallback failed: %w", relayResult.err),
+			fmt.Errorf("croc relay fallback failed: %w", relayErr),
 		)
 	}
 	return relayResult
+}
+
+func reconnectDelay(attempt int, err error) time.Duration {
+	delay := min(time.Duration(max(attempt, 1)-1)*500*time.Millisecond, 5*time.Second)
+	if errors.Is(err, tcp.ErrAdmissionLimited) && delay < 5*time.Second {
+		return 5 * time.Second
+	}
+	return delay
+}
+
+type relayAdmissionError struct{ cause error }
+
+func (e relayAdmissionError) Error() string {
+	return "the croc relay is temporarily rate limiting connection attempts; wait at least five seconds and try again"
+}
+
+func (e relayAdmissionError) Unwrap() error { return e.cause }
+
+func (c *joinClient) friendlyRelayError(err error) error {
+	if err == nil || !errors.Is(err, tcp.ErrAdmissionLimited) {
+		return err
+	}
+	if c.config.Logf != nil {
+		c.config.Logf("SSH relay admission error: %v", err)
+	}
+	return relayAdmissionError{cause: err}
 }
 
 func (c *joinClient) runTransport(transport Transport) joinAttemptResult {
@@ -265,10 +304,12 @@ func (c *joinClient) runTransport(transport Transport) joinAttemptResult {
 			result.err = errors.New("host did not provide a croc relay connection")
 			return result
 		}
+		result.attachmentAttempted = true
 		result.connected, result.err = c.deps.attachRelay(c.ctx, sessionConfig, auth.offer, auth.control.Connection())
 		return result
 	}
 	auth.close()
+	result.attachmentAttempted = true
 	result.connected, result.err = c.deps.attach(c.ctx, sessionConfig, auth.offer, c.clientKey)
 	return result
 }
@@ -422,7 +463,7 @@ func runSSHSession(ctx context.Context, config clientSessionConfig, offer sshOff
 		},
 	})
 	if connected && config.input.Detached() {
-		return true, nil
+		return true, ErrDetached
 	}
 	return connected, err
 }

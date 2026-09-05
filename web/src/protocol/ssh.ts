@@ -78,9 +78,18 @@ function validatePakeMessage(
   if (message.b.byteLength === 0 || message.b.byteLength > MAX_PAKE_SIZE) {
     throw new Error(`SSH host sent an invalid ${expected} value`);
   }
+  if (
+    expected === "pake" &&
+    !message.f?.includes(SSH_RENDEZVOUS_FEATURE)
+  ) {
+    throw new Error("SSH host does not support SSH rendezvous");
+  }
 }
 
 export function validateSSHOffer(message: CrocMessage): SSHOffer {
+  if (message.t === "error" && message.m) {
+    throw new Error(message.m);
+  }
   if (
     message.t !== "ssh-offer" ||
     message.v !== SSH_PROTOCOL_VERSION ||

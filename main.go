@@ -46,7 +46,7 @@ func main() {
 		// commands still retain the prompt exit behavior after this grace period.
 		select {
 		case err = <-errCh:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 		}
 	}
 	utils.RemoveMarkedFiles()

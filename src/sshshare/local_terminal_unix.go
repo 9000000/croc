@@ -8,9 +8,15 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"golang.org/x/term"
+)
+
+const (
+	pushHostTerminalTitle = "\x1b[22;0t\x1b]0;croc ssh — hosting\x07"
+	popHostTerminalTitle  = "\x1b[23;0t"
 )
 
 // AttachLocalTerminal attaches a real local terminal to the host session,
@@ -18,6 +24,12 @@ import (
 func (h *Host) AttachLocalTerminal(ctx context.Context, input *os.File, output io.Writer) error {
 	if input == nil || !term.IsTerminal(int(input.Fd())) {
 		return errors.New("hosting croc ssh interactively requires a terminal (use --headless otherwise)")
+	}
+	if outputFile, ok := output.(*os.File); ok &&
+		term.IsTerminal(int(outputFile.Fd())) &&
+		!strings.EqualFold(strings.TrimSpace(os.Getenv("TERM")), "dumb") {
+		_, _ = io.WriteString(output, pushHostTerminalTitle)
+		defer func() { _, _ = io.WriteString(output, popHostTerminalTitle) }()
 	}
 	width, height, err := term.GetSize(int(input.Fd()))
 	if err != nil {
