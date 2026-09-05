@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/schollz/croc/v11/src/codephrase"
@@ -276,12 +277,7 @@ func derivePeerKeys(
 }
 
 func hasFeature(features []string, expected string) bool {
-	for _, feature := range features {
-		if feature == expected {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(features, expected)
 }
 
 func receiveMessageUntil(c *comm.Comm, encryptionKey []byte, deadline time.Time) (message.Message, error) {

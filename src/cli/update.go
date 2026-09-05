@@ -341,7 +341,7 @@ func downloadUpdate(ctx context.Context, client *http.Client, url string, limit 
 
 func verifyUpdateChecksum(asset string, archive, checksums []byte) error {
 	want := ""
-	for _, line := range strings.Split(string(checksums), "\n") {
+	for line := range strings.SplitSeq(string(checksums), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == asset {
 			if want != "" {

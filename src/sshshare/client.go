@@ -195,8 +195,7 @@ func (c *joinClient) run() error {
 		if errors.Is(result.err, ErrDetached) {
 			return ErrDetached
 		}
-		var exitErr *gossh.ExitError
-		if errors.As(result.err, &exitErr) {
+		if exitErr, ok := errors.AsType[*gossh.ExitError](result.err); ok {
 			return fmt.Errorf("shared SSH terminal ended with status %d: %w", exitErr.ExitStatus(), result.err)
 		}
 		if c.ctx.Err() != nil {

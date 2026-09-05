@@ -311,10 +311,7 @@ func rendezvousRetryDelay(failures int, err error) time.Duration {
 	if failures <= 0 {
 		return rendezvousRetry
 	}
-	delay := rendezvousRetry << min(failures-1, 5)
-	if delay > maxRendezvousRetry {
-		delay = maxRendezvousRetry
-	}
+	delay := min(rendezvousRetry<<min(failures-1, 5), maxRendezvousRetry)
 	if errors.Is(err, tcp.ErrAdmissionLimited) && delay < maxRendezvousRetry {
 		return maxRendezvousRetry
 	}
@@ -328,8 +325,7 @@ func (h *Host) authorizeParticipant(connection *comm.Comm, invite *invitation) (
 	}
 	request, err := receiveAuthorizationRequest(connection, encryptionKey, deadline)
 	if err != nil {
-		var versionErr unsupportedSSHProtocolError
-		if errors.As(err, &versionErr) {
+		if versionErr, ok := errors.AsType[unsupportedSSHProtocolError](err); ok {
 			_ = sendMessageUntil(connection, encryptionKey, message.Message{
 				Type: message.TypeError, Message: versionErr.Error(),
 			}, deadline)
