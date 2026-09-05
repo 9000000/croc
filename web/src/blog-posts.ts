@@ -11,6 +11,7 @@ export type BlogVisual =
   | "derp"
   | "ssh"
   | "ssh-release"
+  | "update-release"
   | "release";
 
 export type BlogKind = "note" | "update";
@@ -161,6 +162,101 @@ export function readingMinutes(blocks: BlogBlock[]) {
 }
 
 const drafts: DraftBlogPost[] = [
+  {
+    slug: "croc-v11-5-release-update",
+    number: "04",
+    title: "croc v11.5 can update itself",
+    description:
+      "croc v11.5 adds safe self-updates and makes shared SSH sessions clearer when they start, reconnect, or end.",
+    kind: "update",
+    category: "Release notes",
+    publishedAt: "2026-09-05",
+    publishedLabel: "September 5, 2026",
+    author: "schollz",
+    visual: "update-release",
+    takeaway:
+      "v11.5 adds croc update for verified standalone upgrades, while making SSH hosting, compatibility errors, relay limits, and clean shutdowns easier to understand.",
+    blocks: [
+      {
+        type: "paragraph",
+        text: "The usual way to update croc has been to install croc again. This works, but it is a funny errand to repeat for a program whose main appeal is doing useful things with one small command. v11.5 adds another one: croc update.",
+      },
+      {
+        type: "paragraph",
+        text: "This is a self-updater, but not an unattended updater. croc will still make its quiet daily version check after a transfer and mention a newer release when one exists. It will not replace itself in the background. You ask it to update, it explains what it found, and it asks before changing the executable.",
+      },
+      { type: "heading", text: "Updating croc from croc" },
+      {
+        type: "code",
+        label: "Check first, then update",
+        lines: [
+          "$ croc update --check",
+          "croc v11.6.0 is available (current: v11.5.0).",
+          "",
+          "$ croc update",
+          "Update croc from v11.5.0 to v11.6.0? (y/N) y",
+          "Updated croc from v11.5.0 to v11.6.0.",
+          "",
+          "# This spelling works too",
+          "$ croc upgrade",
+        ],
+      },
+      {
+        type: "paragraph",
+        text: "The --check form only reports what is available. A normal croc update asks for confirmation, and croc update --yes is there for scripts. The old update notice at the end of a transfer now points to croc update instead of handing you another installer command.",
+      },
+      {
+        type: "paragraph",
+        text: "There is an important limit: croc only replaces an official standalone installation that the installer has marked for this purpose. The mark records the exact, resolved path to the executable. Before updating, croc checks that the path still matches, that it is a regular file rather than a symlink, and that both the file and its directory are writable without asking for more privileges.",
+      },
+      {
+        type: "paragraph",
+        text: "Homebrew, Nix, Scoop, Chocolatey, Conda, MacPorts, Termux, FreeBSD packages, system packages, and go install should remain in charge of their own files. croc recognizes those common locations and prints the appropriate command instead of barging in. On Windows it points to the release download because a running executable cannot be replaced with the same safe operation. That boundary is deliberate: I wanted croc to update itself without appointing it the package manager for the whole computer.",
+      },
+      {
+        type: "paragraph",
+        text: "For an eligible standalone install, croc downloads the release archive and its checksum over HTTPS, verifies the SHA-256 checksum, stages the new binary beside the old one, and runs the staged binary to make sure it reports the requested version. Only then does it replace the current executable with one rename. If any check fails, the croc you started with stays where it was. I made this intentionally conservative. An updater is a useful place to be boring.",
+      },
+      { type: "heading", text: "SSH should look like it is running" },
+      {
+        type: "paragraph",
+        text: "v11.4 introduced croc ssh, and its attached host shell was almost too seamless. After printing the invitation, croc dropped into the shared shell, which could look exactly like it had returned to the ordinary prompt. v11.5 prints a clear entry message, temporarily changes the terminal title to croc ssh — hosting, and restores the old title afterward. It also says plainly what Ctrl-C and Ctrl-] will do.",
+      },
+      {
+        type: "paragraph",
+        text: "The end of a session is clearer as well. Detaching says that the shared shell is still running. Stopping says that it ended. When the host intentionally closes the session, croc now closes the shared PTY first and gives connected guests a short chance to receive the normal SSH exit status. A guest can therefore say that the host ended the terminal instead of repeatedly announcing that the connection was lost. Real transport failures still reconnect as before.",
+      },
+      { type: "heading", text: "Old clients get an answer" },
+      {
+        type: "paragraph",
+        text: "There was an especially confusing mixed-version case. A client from before croc ssh existed could read an SSH invitation as an ordinary receive code and wait forever at “securing channel...”. A v11.5 host now recognizes that older handshake, finishes the authenticated exchange it expects, and returns an encrypted message explaining that SSH sharing needs croc v11.4.0 or newer. Other SSH protocol mismatches also come back as readable encrypted errors in both the terminal and browser.",
+      },
+      {
+        type: "paragraph",
+        text: "Relay failures have received the same treatment. croc now tries the ordinary relay fallback only after Tailcat authorization worked but attaching the SSH connection did not. If the relay is limiting new admissions, the client says so, waits at least five seconds, and keeps the lower-level cause in debug output. Retrying should help with a temporary failure, not turn one failure into several faster failures.",
+      },
+      { type: "heading", text: "Getting v11.5" },
+      {
+        type: "paragraph",
+        text: "A v11.4 client does not know croc update yet, so this is the last standalone update that needs the familiar installer. Install v11.5 once with the official command and that installer will register the executable for later self-updates. Package-managed installations should update through their package manager as usual.",
+      },
+      {
+        type: "code",
+        label: "Install v11.5",
+        lines: [
+          "$ curl https://getcroc.com | bash",
+          "$ croc --version",
+          "croc version 11.5.0",
+          "$ croc update --check",
+          "croc v11.5.0 is up to date.",
+        ],
+      },
+      {
+        type: "paragraph",
+        text: "v11.5 is mostly about removing small moments of doubt: whether croc is still hosting, whether a guest should reconnect, whether the relay wants a pause, and how to get the next release. The commands are still small. They just explain themselves a little better now.",
+      },
+    ],
+  },
   {
     slug: "croc-v11-4-release-update",
     number: "03",

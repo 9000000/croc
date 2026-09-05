@@ -651,6 +651,29 @@ function SSHReleaseVisual() {
   );
 }
 
+function UpdateReleaseVisual() {
+  return (
+    <div className="update-release-visual">
+      <span>
+        <Check />
+        <small>version check</small>
+        <strong>check first</strong>
+      </span>
+      <span>
+        <ShieldCheck />
+        <small>verified release</small>
+        <strong>replace safely</strong>
+      </span>
+      <span>
+        <Terminal />
+        <small>shared SSH</small>
+        <strong>clearer endings</strong>
+      </span>
+      <i>croc v11.5 · updates you control · sharing that explains itself</i>
+    </div>
+  );
+}
+
 function BlogVisualCard({ visual, large = false }: { visual: BlogVisual; large?: boolean }) {
   return (
     <div className={`blog-visual blog-visual-${visual}${large ? " large" : ""}`} aria-hidden="true">
@@ -664,6 +687,7 @@ function BlogVisualCard({ visual, large = false }: { visual: BlogVisual; large?:
       {visual === "derp" ? <DERPVisual /> : null}
       {visual === "ssh" ? <SSHVisual /> : null}
       {visual === "ssh-release" ? <SSHReleaseVisual /> : null}
+      {visual === "update-release" ? <UpdateReleaseVisual /> : null}
       {visual === "release" ? <ReleaseVisual /> : null}
     </div>
   );
@@ -674,7 +698,8 @@ function BlogCoverImage({ post }: { post: BlogPost }) {
     post.visual === "release" ||
     post.visual === "derp" ||
     post.visual === "ssh" ||
-    post.visual === "ssh-release"
+    post.visual === "ssh-release" ||
+    post.visual === "update-release"
   ) {
     return (
       <figure

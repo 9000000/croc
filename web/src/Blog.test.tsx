@@ -11,7 +11,7 @@ describe("Blog", () => {
     expect(
       screen.getByRole("heading", { name: "Notes from inside the transfer." }),
     ).toBeVisible();
-    expect(screen.getAllByRole("article")).toHaveLength(14);
+    expect(screen.getAllByRole("article")).toHaveLength(15);
     const categories = screen.getByRole("navigation", {
       name: "Blog post categories",
     });
