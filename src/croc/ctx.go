@@ -39,6 +39,13 @@ func newStop(ctx context.Context) *stop {
 	return s
 }
 
+func (c *Client) clientContext() context.Context {
+	if c != nil && c.stop != nil && c.stop.ctx != nil {
+		return c.stop.ctx
+	}
+	return context.Background()
+}
+
 func (s *stop) done() {
 	<-s.ctx.Done()
 	s.doneOnce.Do(func() {
@@ -50,6 +57,9 @@ func (s *stop) done() {
 
 // NewCtx creates a client with context support
 func NewCtx(ctx context.Context, ops Options) (*Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Create a regular c
 	c, err := New(ops)
 	if err != nil {
@@ -68,7 +78,21 @@ func NewCtx(ctx context.Context, ops Options) (*Client, error) {
 		select {
 		case <-ctx.Done():
 			log.Trace("parent context canceled")
-			c.SendError()
+			// Notify the peer when possible, but never let a blocked best-effort
+			// notification delay local shutdown. Closing every active connection
+			// then wakes reads and writes that cannot select on the context.
+			notified := make(chan struct{})
+			go func() {
+				c.SendError()
+				close(notified)
+			}()
+			timer := time.NewTimer(25 * time.Millisecond)
+			select {
+			case <-notified:
+				timer.Stop()
+			case <-timer.C:
+			}
+			c.closeAttempt()
 		case <-c.stopChan:
 			// for stop goroutine
 		}

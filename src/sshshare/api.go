@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// ErrDetached indicates that the local user detached while leaving the shared
-// shell and remote participants running.
+// ErrDetached indicates that the local host or guest detached while leaving
+// the shared shell and other participants running.
 var ErrDetached = errors.New("detached from shared SSH terminal")
 
 // Role is the authority granted by an SSH invitation.
@@ -56,6 +56,7 @@ type JoinEvent struct {
 	Role      Role
 	Transport Transport
 	Attempt   int
+	RetryIn   time.Duration
 	Err       error
 }
 

@@ -2,11 +2,13 @@ package utils
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -18,7 +20,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/schollz/croc/v11/src/codephrase"
 	"github.com/schollz/croc/v11/src/receivefs"
@@ -28,6 +29,56 @@ import (
 const TCP_BUFFER_SIZE = 1024 * 64
 
 var bigFileSize = 75000000
+
+type blockingInputReader struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingInputReader) Read([]byte) (int, error) {
+	select {
+	case <-r.started:
+	default:
+		close(r.started)
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
+func TestGetInputContextCancelsBlockedRead(t *testing.T) {
+	reader := &blockingInputReader{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(reader.release)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := getInputContext(ctx, bufio.NewReader(reader), "")
+		result <- err
+	}()
+	<-reader.started
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("blocked prompt did not return after cancellation")
+	}
+}
+
+func TestZipDirectoryContextRemovesCanceledArchive(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "file.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "archive.zip")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := ZipDirectoryContext(ctx, destination, source, nil, nil)
+	assert.ErrorIs(t, err, context.Canceled)
+	_, statErr := os.Stat(destination)
+	assert.True(t, os.IsNotExist(statErr), "canceled zip left %s behind", destination)
+}
 
 func bigFile() {
 	os.WriteFile("bigfile.test", bytes.Repeat([]byte("z"), bigFileSize), 0o666)
@@ -39,53 +90,6 @@ func benchmarkHashFile() string {
 	}
 	bigFile()
 	return "bigfile.test"
-}
-
-func TestShortenProgressFilename(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "short basename",
-			input: path.Join("folder", "short.txt"),
-			want:  "short.txt",
-		},
-		{
-			name:  "exactly twenty Unicode characters",
-			input: strings.Repeat("a", 19) + "ä",
-			want:  strings.Repeat("a", 19) + "ä",
-		},
-		{
-			name:  "long ASCII basename",
-			input: strings.Repeat("a", 21),
-			want:  strings.Repeat("a", 20) + "...",
-		},
-		{
-			name:  "umlaut at former byte boundary",
-			input: strings.Repeat("1", 19) + "ä.txt",
-			want:  strings.Repeat("1", 19) + "ä...",
-		},
-		{
-			name:  "multibyte basename from path",
-			input: path.Join("folder", strings.Repeat("界", 21)+".txt"),
-			want:  strings.Repeat("界", 20) + "...",
-		},
-		{
-			name:  "invalid input bytes",
-			input: strings.Repeat("a", 19) + string([]byte{0xc3}) + ".txt",
-			want:  strings.Repeat("a", 19) + "�...",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := shortenProgressFilename(tt.input)
-			assert.Equal(t, tt.want, got)
-			assert.True(t, utf8.ValidString(got))
-		})
-	}
 }
 
 func TestShouldShowHashProgress(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/schollz/croc/v11/src/codephrase"
@@ -29,7 +30,16 @@ const (
 	sshClientAuthSize    = 32
 	readWritePort        = uint16(22)
 	readOnlyPort         = uint16(23)
+	legacyClientMessage  = "this is a croc ssh invitation; SSH sharing requires croc v11.4.0 or newer; upgrade from https://github.com/schollz/croc/releases/latest"
 )
+
+var errLegacyClientNotified = errors.New("legacy croc client was notified that SSH sharing requires an upgrade")
+
+type unsupportedSSHProtocolError struct{ version int }
+
+func (e unsupportedSSHProtocolError) Error() string {
+	return fmt.Sprintf("unsupported SSH sharing protocol version %d; run 'croc update'", e.version)
+}
 
 // sshOffer is returned to an authenticated guest. The Tailcat address and SSH
 // host key are authenticated by the PAKE channel, so the embedded SSH client
@@ -124,6 +134,9 @@ func guestPAKE(c *comm.Comm, components codephrase.SSHComponents, curve string) 
 	if response.Type != message.TypePAKE || response.Version != pakekey.ProtocolVersion {
 		return nil, time.Time{}, errors.New("invalid SSH PAKE response")
 	}
+	if !hasFeature(response.Features, message.FeatureSSHRendezvous) {
+		return nil, time.Time{}, errors.New("SSH host did not advertise SSH rendezvous support")
+	}
 	if len(response.Bytes) == 0 || len(response.Bytes) > maxPAKEPayload {
 		return nil, time.Time{}, fmt.Errorf("invalid SSH PAKE response length %d", len(response.Bytes))
 	}
@@ -133,8 +146,8 @@ func guestPAKE(c *comm.Comm, components codephrase.SSHComponents, curve string) 
 	if err = initiator.Update(response.Bytes); err != nil {
 		return nil, time.Time{}, fmt.Errorf("SSH PAKE response: %w", err)
 	}
-	keys, err := deriveSSHKeys(
-		initiator, components, curve, initiatorBytes, response.Bytes, response.Bytes2,
+	keys, err := derivePeerKeys(
+		initiator, components, curve, pakekey.PurposeSSH, initiatorBytes, response.Bytes, response.Bytes2,
 	)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -177,10 +190,18 @@ func hostPAKE(c *comm.Comm, components codephrase.SSHComponents) ([]byte, time.T
 	if len(request.Bytes2) == 0 || len(request.Bytes2) > 64 {
 		return nil, time.Time{}, errors.New("invalid SSH PAKE curve")
 	}
+	purpose := pakekey.PurposeSSH
+	sshClient := hasFeature(request.Features, message.FeatureSSHRendezvous)
+	if !sshClient {
+		// croc versions released before SSH sharing interpret `croc ssh` as a
+		// normal receive operation. Complete their authenticated transfer PAKE
+		// so they can display a useful encrypted error instead of hanging.
+		purpose = pakekey.PurposeTransfer
+	}
 	curve := string(request.Bytes2)
 	responder, err := pakekey.Init(
 		[]byte(components.PAKEPassphrase), 1, curve,
-		pakekey.PurposeSSH, components.RoomName,
+		purpose, components.RoomName,
 	)
 	if err != nil {
 		return nil, time.Time{}, err
@@ -193,17 +214,20 @@ func hostPAKE(c *comm.Comm, components codephrase.SSHComponents) ([]byte, time.T
 	if _, err = rand.Read(salt); err != nil {
 		return nil, time.Time{}, fmt.Errorf("generate SSH PAKE salt: %w", err)
 	}
-	keys, err := deriveSSHKeys(
-		responder, components, curve, request.Bytes, responderBytes, salt,
+	keys, err := derivePeerKeys(
+		responder, components, curve, purpose, request.Bytes, responderBytes, salt,
 	)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	if err = sendMessageUntil(c, nil, message.Message{
+	response := message.Message{
 		Type: message.TypePAKE, Version: pakekey.ProtocolVersion,
 		Bytes: responderBytes, Bytes2: salt,
-		Features: []string{message.FeatureSSHRendezvous},
-	}, deadline); err != nil {
+	}
+	if sshClient {
+		response.Features = []string{message.FeatureSSHRendezvous}
+	}
+	if err = sendMessageUntil(c, nil, response, deadline); err != nil {
 		return nil, time.Time{}, err
 	}
 	confirmation, err := receiveMessageUntil(c, nil, deadline)
@@ -221,13 +245,21 @@ func hostPAKE(c *comm.Comm, components codephrase.SSHComponents) ([]byte, time.T
 	}, deadline); err != nil {
 		return nil, time.Time{}, err
 	}
+	if !sshClient {
+		if err = sendMessageUntil(c, keys.EncryptionKey, message.Message{
+			Type: message.TypeError, Message: legacyClientMessage,
+		}, deadline); err != nil {
+			return nil, time.Time{}, err
+		}
+		return nil, time.Time{}, errLegacyClientNotified
+	}
 	return keys.EncryptionKey, deadline, nil
 }
 
-func deriveSSHKeys(
+func derivePeerKeys(
 	p *pake.Pake,
 	components codephrase.SSHComponents,
-	curve string,
+	curve, purpose string,
 	initiator, responder, salt []byte,
 ) (pakekey.Keys, error) {
 	shared, err := p.SessionKey()
@@ -235,13 +267,17 @@ func deriveSSHKeys(
 		return pakekey.Keys{}, err
 	}
 	return pakekey.Derive(shared, pakekey.Context{
-		Purpose:   pakekey.PurposeSSH,
+		Purpose:   purpose,
 		Room:      components.RoomName,
 		Curve:     curve,
 		Initiator: initiator,
 		Responder: responder,
 		Salt:      salt,
 	})
+}
+
+func hasFeature(features []string, expected string) bool {
+	return slices.Contains(features, expected)
 }
 
 func receiveMessageUntil(c *comm.Comm, encryptionKey []byte, deadline time.Time) (message.Message, error) {
@@ -297,7 +333,13 @@ func receiveAuthorizationRequest(c *comm.Comm, encryptionKey []byte, deadline ti
 	if err != nil {
 		return authorizationRequest{}, err
 	}
-	if m.Type != message.TypeSSHAuthorize || m.Version != protocolVersion || len(m.Features) != 1 {
+	if m.Type != message.TypeSSHAuthorize {
+		return authorizationRequest{}, errors.New("invalid SSH authorization request")
+	}
+	if m.Version != protocolVersion {
+		return authorizationRequest{}, unsupportedSSHProtocolError{version: m.Version}
+	}
+	if len(m.Features) != 1 {
 		return authorizationRequest{}, errors.New("invalid SSH authorization request")
 	}
 	if len(m.Bytes) != 32 {
@@ -349,6 +391,9 @@ func receiveOffer(c *comm.Comm, encryptionKey []byte, deadline time.Time) (sshOf
 	m, err := receiveMessageUntil(c, encryptionKey, deadline)
 	if err != nil {
 		return sshOffer{}, err
+	}
+	if m.Type == message.TypeError && m.Message != "" {
+		return sshOffer{}, errors.New(m.Message)
 	}
 	if m.Type != message.TypeSSHOffer || m.Version != protocolVersion || len(m.Features) != 2 {
 		return sshOffer{}, errors.New("invalid SSH offer")

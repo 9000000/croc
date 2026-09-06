@@ -14,6 +14,7 @@ import (
 	log "github.com/schollz/croc/v11/src/logger"
 	"github.com/schollz/croc/v11/src/models"
 	"github.com/schollz/croc/v11/src/sshshare"
+	"github.com/schollz/croc/v11/src/tcp"
 	"github.com/schollz/croc/v11/src/termui"
 	"github.com/schollz/croc/v11/src/utils"
 )
@@ -60,12 +61,12 @@ func joinSSHSession(c *cli.Context) error {
 	}
 	if secret == "" {
 		var err error
-		secret, err = utils.GetInput("Enter SSH code: ")
+		secret, err = utils.GetInputContext(c.Context, "Enter SSH code: ")
 		if err != nil {
 			return fmt.Errorf("could not read SSH code: %w", err)
 		}
 	}
-	return sshshare.Join(c.Context, sshshare.ClientConfig{
+	err = sshshare.Join(c.Context, sshshare.ClientConfig{
 		Code:            secret,
 		RelayAddress:    relay,
 		RelayPassword:   relayPassword,
@@ -86,11 +87,25 @@ func joinSSHSession(c *cli.Context) error {
 				}
 				fmt.Fprintf(os.Stderr, "Connected with %s access%s. Press Ctrl-] to detach.\r\n", event.Role, path)
 			case sshshare.JoinStateReconnecting:
-				fmt.Fprintf(os.Stderr, "\r\nConnection lost; reconnecting…\r\n")
+				if errors.Is(event.Err, tcp.ErrAdmissionLimited) {
+					fmt.Fprintf(os.Stderr, "\r\nThe relay is rate limiting reconnects; retrying in %s (attempt %d)…\r\n", event.RetryIn, event.Attempt)
+				} else if event.RetryIn > 0 {
+					fmt.Fprintf(os.Stderr, "\r\nConnection lost; retrying in %s (attempt %d)…\r\n", event.RetryIn, event.Attempt)
+				} else {
+					fmt.Fprintf(os.Stderr, "\r\nConnection lost; reconnecting…\r\n")
+				}
 			}
 		},
 		Logf: func(format string, args ...any) { log.Debugf(format, args...) },
 	})
+	if errors.Is(err, sshshare.ErrDetached) {
+		fmt.Fprintln(os.Stderr, "\r\nDetached from the shared terminal.")
+		return nil
+	}
+	if err == nil {
+		fmt.Fprintln(os.Stderr, "\r\nThe host ended the shared terminal.")
+	}
+	return err
 }
 
 func hostSSHSession(c *cli.Context) error {
@@ -122,17 +137,25 @@ func hostSSHSession(c *cli.Context) error {
 	fmt.Fprintf(output, "  Read-only:  %s\n", formatSSHJoinCommand(host.Code(sshshare.RoleReadOnly), relay, relayPassword, colorEnabled))
 	fmt.Fprint(output, formatSSHBrowserLinks(host.Code(sshshare.RoleReadWrite), host.Code(sshshare.RoleReadOnly)))
 	fmt.Fprintf(output, "  Expires:    %s\n", duration)
-	fmt.Fprintln(output, "  Stop:       Ctrl-C")
 	if c.Bool("headless") {
 		fmt.Fprintln(output, "Waiting for participants…")
-		return host.Wait()
+		err = host.Wait()
+		if err == nil {
+			fmt.Fprintln(output, "Shared SSH terminal ended.")
+		}
+		return err
 	}
-	fmt.Fprintln(output, "  Detach:     Ctrl-] (the shared shell keeps running)")
+	fmt.Fprintln(output)
+	fmt.Fprintln(output, termui.Emphasis("Entering the shared shell — croc ssh is still running.", colorEnabled))
+	fmt.Fprintln(output, "Ctrl-C stops sharing for everyone; Ctrl-] detaches and leaves it running.")
 
 	err = host.AttachLocalTerminal(ctx, os.Stdin, os.Stdout)
 	if errors.Is(err, sshshare.ErrDetached) {
 		fmt.Fprintln(os.Stderr, "\nDetached; the shared shell is still running. Press Ctrl-C to stop it.")
 		return host.Wait()
+	}
+	if err == nil {
+		fmt.Fprintln(os.Stderr, "\nShared SSH terminal ended.")
 	}
 	return err
 }

@@ -52,8 +52,13 @@ curl https://getcroc.com | bash
 
 When the CLI sends or receives a transfer, it checks for a newer croc release at
 most once every 24 hours. The check runs in the background and any update notice
-is shown after the transfer finishes. Network and release-service failures are
-ignored; `--quiet` suppresses the notice.
+is shown after the transfer finishes. Run `croc update --check` at any time to
+check explicitly. Installations made by the command above can use `croc update`
+(`croc upgrade` is an alias) to verify and install a stable release when the
+executable is user-writable; pass `--yes` to skip confirmation.
+Package-managed and other installations are never overwritten; the command
+prints the appropriate upgrade guidance instead. Network and release-service
+failures in background checks are ignored; `--quiet` suppresses the notice.
 
 ### On macOS
 

@@ -16,9 +16,10 @@ type stop struct {
 	cancel     context.CancelFunc
 	cancelOnce sync.Once
 	// Track connections
-	server net.Listener
-	wg     sync.WaitGroup
-	gui    bool
+	serverMu sync.RWMutex
+	server   net.Listener
+	wg       sync.WaitGroup
+	gui      bool
 }
 
 // newStop creates a new stop manager
@@ -38,6 +39,18 @@ func (s *stop) Cancel() {
 		log.Trace("tcp Cancel")
 		s.cancel()
 	})
+}
+
+func (s *stop) setServer(server net.Listener) {
+	s.serverMu.Lock()
+	s.server = server
+	s.serverMu.Unlock()
+}
+
+func (s *stop) getServer() net.Listener {
+	s.serverMu.RLock()
+	defer s.serverMu.RUnlock()
+	return s.server
 }
 
 func RunCtx(ctx context.Context, debugLevel, host, port, password string, banner ...string) error {

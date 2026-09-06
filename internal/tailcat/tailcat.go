@@ -541,6 +541,9 @@ func (s *Server) Close() error {
 // this side closed first instead parks in TIME-WAIT and would block
 // DrainTCP until the TIME-WAIT timer fires.
 func (s *Server) DrainTCP(ctx context.Context) error {
+	if s.lb == nil {
+		return nil
+	}
 	// Wait blocks until the endpoint is fully closed (EventHUp).
 	// Non-TCP endpoints return immediately. A waiter goroutine may
 	// outlive an early ctx cancellation; it exits with the process

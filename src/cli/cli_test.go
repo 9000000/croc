@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,7 +20,50 @@ import (
 	"github.com/schollz/croc/v11/src/models"
 	"github.com/schollz/croc/v11/src/publicrelay"
 	"github.com/schollz/croc/v11/src/tcp"
+	"github.com/stretchr/testify/require"
 )
+
+type blockingCLIReader struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingCLIReader) Read([]byte) (int, error) {
+	select {
+	case <-r.started:
+	default:
+		close(r.started)
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
+func TestCopyStdinContextCancelsAndRemovesTemporaryFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	reader := &blockingCLIReader{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(reader.release)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := copyStdinContext(ctx, reader)
+		result <- err
+	}()
+	<-reader.started
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		require.ErrorIs(t, err, context.Canceled)
+		require.Less(t, time.Since(started), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("stdin copy did not stop after cancellation")
+	}
+	matches, err := filepath.Glob("croc-stdin-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	require.Empty(t, matches, "canceled stdin copy left a temporary file")
+}
 
 func TestRelayMaxRoomsOpenConfiguration(t *testing.T) {
 	t.Run("default", func(t *testing.T) {
@@ -59,6 +104,49 @@ func TestRelayRejectsNonPositiveMaxRoomsOpen(t *testing.T) {
 				t.Fatalf("unexpected error: %q", got)
 			}
 		})
+	}
+}
+
+func TestRelayStopsPromptlyWhenCommandContextIsCanceled(t *testing.T) {
+	listeners := make([]net.Listener, 0, 2)
+	ports := make([]string, 0, 2)
+	for range 2 {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		_, port, err := net.SplitHostPort(listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ports = append(ports, port)
+	}
+	for _, listener := range listeners {
+		_ = listener.Close()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- newApp().RunContext(ctx, []string{
+			"croc", "relay", "--host", "127.0.0.1", "--ports", strings.Join(ports, ","),
+		})
+	}()
+	address := net.JoinHostPort("127.0.0.1", ports[0])
+	require.Eventually(t, func() bool { return tcp.PingServer(address) == nil }, 2*time.Second, 10*time.Millisecond)
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("relay cancellation returned %v", err)
+		}
+		if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+			t.Fatalf("relay cancellation took %s", elapsed)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("relay did not stop after command context cancellation")
 	}
 }
 
@@ -698,12 +786,65 @@ func TestSelectBestPublicRelay(t *testing.T) {
 			return 0, errors.New("unavailable")
 		}
 	}
-	index, err := selectBestPublicRelay(probe)
+	index, err := selectBestPublicRelay(context.Background(), probe)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if index != 1 {
 		t.Fatalf("best relay index = %d, want 1", index)
+	}
+}
+
+func TestSelectBestPublicRelayHonorsCommandCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	startedProbe := make(chan struct{}, len(publicrelay.Relays()))
+	probe := func(ctx context.Context, _ string, _ time.Duration) (time.Duration, error) {
+		startedProbe <- struct{}{}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := selectBestPublicRelay(ctx, probe)
+		result <- err
+	}()
+	<-startedProbe
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("relay selection cancellation returned %v", err)
+		}
+		if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+			t.Fatalf("relay selection cancellation took %s", elapsed)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("relay selection did not stop after cancellation")
+	}
+}
+
+func TestStoredSendHonorsCommandCancellation(t *testing.T) {
+	configDirectory := t.TempDir()
+	t.Setenv("CROC_CONFIG_DIR", configDirectory)
+	if err := writeVersionCheckCache(filepath.Join(configDirectory, versionCheckCacheName), versionCheckCache{
+		CheckedAt: time.Now().UTC(), LatestVersion: Version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "payload.txt")
+	if err := os.WriteFile(file, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	err := newApp().RunContext(ctx, []string{"croc", "--ignore-stdin", "send", "--store", file})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("stored send cancellation returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 500*time.Millisecond {
+		t.Fatalf("stored send cancellation took %s", elapsed)
 	}
 }
 
@@ -747,7 +888,7 @@ func TestSelectPublicRelayCacheHitBypassesProbes(t *testing.T) {
 		t.Fatal(err)
 	}
 	probes := 0
-	index, err := selectPublicRelay(func(context.Context, string, time.Duration) (time.Duration, error) {
+	index, err := selectPublicRelay(context.Background(), func(context.Context, string, time.Duration) (time.Duration, error) {
 		probes++
 		return 0, errors.New("probe should not run")
 	})
@@ -768,7 +909,7 @@ func TestSelectPublicRelayReplacesInvalidCache(t *testing.T) {
 				t.Fatal(err)
 			}
 			winner := publicrelay.Relays()[1]
-			index, err := selectPublicRelay(func(ctx context.Context, address string, _ time.Duration) (time.Duration, error) {
+			index, err := selectPublicRelay(context.Background(), func(ctx context.Context, address string, _ time.Duration) (time.Duration, error) {
 				if address == winner {
 					return time.Millisecond, nil
 				}
@@ -799,7 +940,7 @@ func TestSelectPublicRelayIgnoresCacheWriteFailure(t *testing.T) {
 	}
 	t.Setenv("CROC_CONFIG_DIR", configPath)
 	winner := publicrelay.Relays()[0]
-	index, err := selectPublicRelay(func(ctx context.Context, address string, _ time.Duration) (time.Duration, error) {
+	index, err := selectPublicRelay(context.Background(), func(ctx context.Context, address string, _ time.Duration) (time.Duration, error) {
 		if address == winner {
 			return time.Millisecond, nil
 		}

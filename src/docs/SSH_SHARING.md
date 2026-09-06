@@ -36,10 +36,14 @@ croc ssh --dir /path/to/project
 ```
 
 `--headless` keeps the session available without attaching the host terminal.
-The default lifetime is 12 hours. `Ctrl-]` detaches an attached host or guest
-while leaving the shared shell alive; `Ctrl-C` in the hosting process stops the
-session. A command typed inside the shared terminal, including `exit`, affects
-the one shared shell and therefore ends the session for everyone.
+The attached host prints a prominent entry banner and temporarily changes the
+terminal title to `croc ssh — hosting`. The title is restored on exit. The
+default lifetime is 12 hours. `Ctrl-]` intentionally detaches an attached host
+or guest while leaving the shared shell alive; `Ctrl-C` in the hosting process
+stops the session. A command typed inside the shared terminal, including `exit`,
+affects the one shared shell and therefore ends the session for everyone. A
+clean host shutdown is reported to guests as the end of the shared terminal,
+not as a connection to retry.
 
 For guests, `Ctrl-C` remains normal terminal input and interrupts the foreground
 program in the shared shell. Only the locally attached hosting process treats
@@ -89,9 +93,16 @@ croc ssh --reconnect-window 10m
 croc ssh --no-reconnect
 ```
 
+Clients that predate SSH sharing receive an authenticated upgrade message
+instead of waiting indefinitely at `securing channel...`; SSH sharing requires
+croc v11.4.0 or newer. Other SSH wire incompatibilities are likewise returned
+through the encrypted control channel.
+
 Transport selection defaults to `auto`: try Tailcat (direct UDP with DERP
-fallback), then reauthenticate over the ordinary croc relay if Tailcat cannot
-establish the SSH connection. It can be constrained for diagnostics or network
+fallback), then reauthenticate over the ordinary croc relay only if Tailcat was
+authorized but could not attach the SSH connection. Relay admission limits are
+reported explicitly and reconnect attempts wait at least five seconds before
+trying again. Transport selection can be constrained for diagnostics or network
 policy:
 
 ```bash

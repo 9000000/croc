@@ -15,7 +15,9 @@ import (
 	"github.com/schollz/croc/v11/internal/tailcat"
 	"github.com/schollz/croc/v11/src/codephrase"
 	"github.com/schollz/croc/v11/src/comm"
+	"github.com/schollz/croc/v11/src/message"
 	"github.com/schollz/croc/v11/src/publicrelay"
+	"github.com/schollz/croc/v11/src/tcp"
 	gossh "golang.org/x/crypto/ssh"
 	"tailscale.com/types/key"
 )
@@ -23,6 +25,8 @@ import (
 const (
 	defaultAuthorizationTTL = 30 * time.Second
 	rendezvousRetry         = 250 * time.Millisecond
+	maxRendezvousRetry      = 5 * time.Second
+	gracefulShutdownTimeout = 2 * time.Second
 )
 
 type roleGrant struct {
@@ -65,6 +69,7 @@ type Host struct {
 	sessionMu sync.Mutex
 	closing   bool
 	sessionWG sync.WaitGroup
+	attachWG  sync.WaitGroup
 
 	wg        sync.WaitGroup
 	closeOnce sync.Once
@@ -82,6 +87,9 @@ func StartHost(parent context.Context, config HostConfig) (*Host, error) {
 func startHostWithDeps(parent context.Context, config HostConfig, deps hostDeps) (*Host, error) {
 	if parent == nil {
 		return nil, errors.New("SSH host context is required")
+	}
+	if err := parent.Err(); err != nil {
+		return nil, err
 	}
 	deps = deps.withDefaults()
 	if config.RelayPassword == "" {
@@ -145,7 +153,10 @@ func startHostWithDeps(parent context.Context, config HostConfig, deps hostDeps)
 		invite.relay = relay
 	}
 
-	ctx, cancel := context.WithCancel(parent)
+	// Parent cancellation is observed below and routed through Host.Close so
+	// active SSH sessions can receive a clean exit status before their transport
+	// is torn down.
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parent))
 	hub, err := deps.startTerminal(ctx, config.Command, config.Directory, config.InitialSize)
 	if err != nil {
 		cancel()
@@ -173,7 +184,7 @@ func startHostWithDeps(parent context.Context, config HostConfig, deps hostDeps)
 		invite.sshServer = deps.newSSHServer(hub, signer, invite.role, h.beginAttachment)
 	}
 
-	startupCtx, startupCancel := context.WithTimeout(ctx, 30*time.Second)
+	startupCtx, startupCancel := context.WithTimeout(parent, 30*time.Second)
 	defer startupCancel()
 	server, offer, err := deps.startTransport(startupCtx, config, h.handlerForPort)
 	if err != nil {
@@ -195,7 +206,7 @@ func startHostWithDeps(parent context.Context, config HostConfig, deps hostDeps)
 	}
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-parent.Done():
 		case <-hub.Done():
 		}
 		_ = h.Close()
@@ -256,6 +267,7 @@ func relayForCode(explicit, code string) (string, error) {
 
 func (h *Host) serveRendezvous(invite *invitation) {
 	defer h.wg.Done()
+	failures := 0
 	for {
 		select {
 		case <-h.ctx.Done():
@@ -274,10 +286,18 @@ func (h *Host) serveRendezvous(invite *invitation) {
 			}
 			stopClose()
 		}
+		if errors.Is(err, errLegacyClientNotified) {
+			err = nil
+		}
 		if err != nil && h.ctx.Err() == nil && h.config.Logf != nil {
 			h.config.Logf("SSH %s rendezvous: %v", invite.role, err)
 		}
-		timer := time.NewTimer(rendezvousRetry)
+		if err == nil {
+			failures = 0
+		} else {
+			failures++
+		}
+		timer := time.NewTimer(rendezvousRetryDelay(failures, err))
 		select {
 		case <-timer.C:
 		case <-h.ctx.Done():
@@ -287,6 +307,17 @@ func (h *Host) serveRendezvous(invite *invitation) {
 	}
 }
 
+func rendezvousRetryDelay(failures int, err error) time.Duration {
+	if failures <= 0 {
+		return rendezvousRetry
+	}
+	delay := min(rendezvousRetry<<min(failures-1, 5), maxRendezvousRetry)
+	if errors.Is(err, tcp.ErrAdmissionLimited) && delay < maxRendezvousRetry {
+		return maxRendezvousRetry
+	}
+	return delay
+}
+
 func (h *Host) authorizeParticipant(connection *comm.Comm, invite *invitation) (bool, error) {
 	encryptionKey, deadline, err := hostPAKE(connection, invite.components)
 	if err != nil {
@@ -294,6 +325,11 @@ func (h *Host) authorizeParticipant(connection *comm.Comm, invite *invitation) (
 	}
 	request, err := receiveAuthorizationRequest(connection, encryptionKey, deadline)
 	if err != nil {
+		if versionErr, ok := errors.AsType[unsupportedSSHProtocolError](err); ok {
+			_ = sendMessageUntil(connection, encryptionKey, message.Message{
+				Type: message.TypeError, Message: versionErr.Error(),
+			}, deadline)
+		}
 		return false, err
 	}
 	offer := sshOffer{
@@ -493,10 +529,12 @@ func (h *Host) beginAttachment(role Role) func() {
 		return nil
 	}
 	h.sessionWG.Add(1)
+	h.attachWG.Add(1)
 	h.sessionMu.Unlock()
 	h.participantEvent(role, true)
 	return sync.OnceFunc(func() {
 		h.participantEvent(role, false)
+		h.attachWG.Done()
 		h.sessionWG.Done()
 	})
 }
@@ -538,8 +576,23 @@ func (h *Host) Close() error {
 		h.sessionMu.Lock()
 		h.closing = true
 		h.sessionMu.Unlock()
-		h.cancel()
 		h.revokeAllGrants()
+
+		// Closing the PTY wakes active SSH handlers. Give them a bounded window
+		// to send exit-status and channel-close before forcing the transports
+		// down; otherwise guests cannot distinguish host shutdown from packet
+		// loss and enter their reconnect loop.
+		if h.hub != nil {
+			h.closeErr = errors.Join(h.closeErr, h.hub.Close())
+		}
+		graceCtx, graceCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		_ = waitForWaitGroup(graceCtx, &h.attachWG)
+		if drainer, ok := h.server.(interface{ DrainTCP(context.Context) error }); ok {
+			_ = drainer.DrainTCP(graceCtx)
+		}
+		graceCancel()
+
+		h.cancel()
 		for _, invite := range h.invitations {
 			if invite.sshServer != nil {
 				h.closeErr = errors.Join(h.closeErr, invite.sshServer.Close())
@@ -548,12 +601,23 @@ func (h *Host) Close() error {
 		if h.server != nil {
 			h.closeErr = errors.Join(h.closeErr, h.server.Close())
 		}
-		if h.hub != nil {
-			h.closeErr = errors.Join(h.closeErr, h.hub.Close())
-		}
 		h.wg.Wait()
 		h.sessionWG.Wait()
 		close(h.done)
 	})
 	return h.closeErr
+}
+
+func waitForWaitGroup(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

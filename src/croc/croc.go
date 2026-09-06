@@ -33,7 +33,6 @@ import (
 	"github.com/schollz/peerdiscovery"
 	"github.com/schollz/progressbar/v3"
 	"github.com/skip2/go-qrcode"
-	"golang.org/x/term"
 	"golang.org/x/time/rate"
 
 	"github.com/schollz/croc/v11/src/codephrase"
@@ -800,7 +799,13 @@ func (c *Client) transferWithReconnect(connectAttempt func(attempt int) error) e
 		if attempt > 0 {
 			delay := reconnectBackoff(attempt)
 			log.Debugf("reconnect attempt %d after %s", attempt, delay)
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-c.stop.ctx.Done():
+				timer.Stop()
+				return c.stop.ctx.Err()
+			}
 			if err := c.resetForReconnectAttempt(attempt); err != nil {
 				return err
 			}
@@ -982,10 +987,13 @@ func (c *Client) closeReceiveFilesystem() {
 
 // helper function to walk each subfolder and parses against an ignore file.
 // returns a hashmap Key: Absolute filepath, Value: boolean (true=ignore)
-func gitWalk(dir string, gitObj *ignore.GitIgnore, files map[string]bool) {
+func gitWalk(ctx context.Context, dir string, gitObj *ignore.GitIgnore, files map[string]bool) error {
 	var ignoredDir bool
 	var current string
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			return err
 		}
@@ -1008,9 +1016,10 @@ func gitWalk(dir string, gitObj *ignore.GitIgnore, files map[string]bool) {
 			return nil
 		}
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("filepath error")
 	}
+	return err
 }
 
 func isChild(parentPath, childPath string) bool {
@@ -1028,16 +1037,36 @@ func isChild(parentPath, childPath string) bool {
 // This function retrieves the important file information
 // for every file that will be transferred
 func GetFilesInfo(fnames []string, zipfolder bool, ignoreGit bool, exclusions []string) (filesInfo []FileInfo, emptyFolders []FileInfo, totalNumberFolders int, err error) {
-	return GetFilesInfoWithExactExclusions(fnames, zipfolder, ignoreGit, exclusions, nil)
+	return GetFilesInfoContext(context.Background(), fnames, zipfolder, ignoreGit, exclusions)
+}
+
+// GetFilesInfoContext is GetFilesInfo with cancellation support.
+func GetFilesInfoContext(ctx context.Context, fnames []string, zipfolder bool, ignoreGit bool, exclusions []string) (filesInfo []FileInfo, emptyFolders []FileInfo, totalNumberFolders int, err error) {
+	return GetFilesInfoWithExactExclusionsContext(ctx, fnames, zipfolder, ignoreGit, exclusions, nil)
 }
 
 // GetFilesInfoWithExactExclusions retrieves file information while applying
 // both the legacy substring exclusions and exact relative-path exclusions.
 func GetFilesInfoWithExactExclusions(fnames []string, zipfolder bool, ignoreGit bool, exclusions, exactExclusions []string) (filesInfo []FileInfo, emptyFolders []FileInfo, totalNumberFolders int, err error) {
+	return GetFilesInfoWithExactExclusionsContext(context.Background(), fnames, zipfolder, ignoreGit, exclusions, exactExclusions)
+}
+
+// GetFilesInfoWithExactExclusionsContext retrieves file information while
+// allowing a large directory walk or zip operation to be canceled.
+func GetFilesInfoWithExactExclusionsContext(ctx context.Context, fnames []string, zipfolder bool, ignoreGit bool, exclusions, exactExclusions []string) (filesInfo []FileInfo, emptyFolders []FileInfo, totalNumberFolders int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
 	// fnames: the relative/absolute paths of files/folders that will be transferred
 	totalNumberFolders = 0
 	var paths []string
 	for _, fname := range fnames {
+		if err = ctx.Err(); err != nil {
+			return
+		}
 		// Support wildcard
 		if strings.Contains(fname, "*") {
 			matches, errGlob := filepath.Glob(fname)
@@ -1053,6 +1082,9 @@ func GetFilesInfoWithExactExclusions(fnames []string, zipfolder bool, ignoreGit 
 	}
 	ignoredPaths := make(map[string]bool)
 	if ignoreGit {
+		if err = ctx.Err(); err != nil {
+			return
+		}
 		wd, wdErr := os.Stat(".gitignore")
 		if wdErr == nil {
 			gitIgnore, gitErr := ignore.CompileIgnoreFile(wd.Name())
@@ -1070,6 +1102,9 @@ func GetFilesInfoWithExactExclusions(fnames []string, zipfolder bool, ignoreGit 
 			}
 		}
 		for _, path := range paths {
+			if err = ctx.Err(); err != nil {
+				return
+			}
 			abs, absErr := filepath.Abs(path)
 			if absErr != nil {
 				err = absErr
@@ -1084,12 +1119,17 @@ func GetFilesInfoWithExactExclusions(fnames []string, zipfolder bool, ignoreGit 
 						err = gitObjErr
 						return
 					}
-					gitWalk(abs, gitObj, ignoredPaths)
+					if err = gitWalk(ctx, abs, gitObj, ignoredPaths); err != nil {
+						return
+					}
 				}
 			}
 		}
 	}
 	for _, fpath := range paths {
+		if err = ctx.Err(); err != nil {
+			return
+		}
 		stat, errStat := os.Lstat(fpath)
 
 		if errStat != nil {
@@ -1109,7 +1149,7 @@ func GetFilesInfoWithExactExclusions(fnames []string, zipfolder bool, ignoreGit 
 			}
 			fpath = filepath.Dir(fpath)
 			dest := filepath.Base(fpath) + ".zip"
-			err = utils.ZipDirectoryWithExactExclusions(dest, fpath, ignoredPaths, exclusions, exactExclusions)
+			err = utils.ZipDirectoryWithExactExclusionsContext(ctx, dest, fpath, ignoredPaths, exclusions, exactExclusions)
 			if err != nil {
 				return
 			}
@@ -1145,6 +1185,9 @@ func GetFilesInfoWithExactExclusions(fnames []string, zipfolder bool, ignoreGit 
 		if stat.IsDir() {
 			err = filepath.Walk(absPath,
 				func(pathName string, info os.FileInfo, err error) error {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return ctxErr
+					}
 					if err != nil {
 						return err
 					}
@@ -1412,7 +1455,14 @@ func (c *Client) broadcastOnLocalNetwork(useipv6 bool) {
 }
 
 func (c *Client) transferOverLocalRelay(errchan chan<- error) {
-	time.Sleep(500 * time.Millisecond)
+	timer := time.NewTimer(500 * time.Millisecond)
+	select {
+	case <-timer.C:
+	case <-c.stop.ctx.Done():
+		timer.Stop()
+		errchan <- c.stop.ctx.Err()
+		return
+	}
 	log.Debug("establishing connection")
 	if !c.Options.OnlyLocal {
 		c.rememberReconnectRelayAddress(c.Options.RelayAddress)
@@ -1420,21 +1470,35 @@ func (c *Client) transferOverLocalRelay(errchan chan<- error) {
 	}
 	localControlAddress := "127.0.0.1:" + c.localRelayPort
 	var banner string
-	conn, banner, _, err := tcp.ConnectToTCPServer(localControlAddress, c.Options.RelayPassword, c.Options.RoomName)
+	conn, banner, _, _, err := tcp.ConnectToTCPServerControlContext(c.stop.ctx, localControlAddress, c.Options.RelayPassword, c.Options.RoomName)
 	log.Debugf("banner: %s", banner)
 	if err != nil {
 		err = fmt.Errorf("could not connect to 127.0.0.1:%s: %w", c.localRelayPort, err)
 		log.Debug(err)
-		// not really an error because it will try to connect over the actual relay
+		if c.Options.OnlyLocal || c.stop.ctx.Err() != nil {
+			errchan <- err
+		}
+		// Otherwise this is not fatal because the external relay is still racing.
 		return
 	}
+	stopClose := context.AfterFunc(c.stop.ctx, conn.Close)
+	defer stopClose()
+	defer conn.Close()
 	log.Debugf("local connection established: %+v", conn)
 	for {
 		if err := c.ctxErr(); err != nil {
 			errchan <- err
 			return
 		}
-		data, _ := conn.Receive()
+		data, receiveErr := conn.Receive()
+		if receiveErr != nil {
+			if ctxErr := c.stop.ctx.Err(); ctxErr != nil {
+				errchan <- ctxErr
+			} else if c.Options.OnlyLocal {
+				errchan <- receiveErr
+			}
+			return
+		}
 		if bytes.Equal(data, handshakeRequest) {
 			break
 		} else if bytes.Equal(data, []byte{1}) {
@@ -1654,7 +1718,7 @@ func (c *Client) reconnectRelayAttempt(handshake func(*comm.Comm) error) error {
 	}
 	var reconnectErrors []string
 	for _, address := range candidates {
-		conn, banner, ipaddr, capability, err := tcp.ConnectToTCPServerControl(address, c.Options.RelayPassword, room)
+		conn, banner, ipaddr, capability, err := tcp.ConnectToTCPServerControlContext(c.stop.ctx, address, c.Options.RelayPassword, room)
 		if err != nil {
 			reconnectErrors = append(reconnectErrors, fmt.Sprintf("%s: %v", address, err))
 			continue
@@ -1781,6 +1845,9 @@ func (c *Client) Send(filesInfo []FileInfo, emptyFoldersToTransfer []FileInfo, t
 			}
 			log.Debugf("banner: %s", route.banner)
 			log.Debugf("connection established: %+v", route.connection)
+			stopClose := context.AfterFunc(c.stop.ctx, route.connection.Close)
+			defer stopClose()
+			defer route.connection.Close()
 			// Preserve the public relay's observation before a direct route can
 			// switch the sender to its own loopback relay.
 			c.ExternalIP = route.externalIP
@@ -2112,7 +2179,7 @@ func (c *Client) Receive() (err error) {
 				// }
 
 				serverTry := net.JoinHostPort(ip, port)
-				conn, banner2, externalIP, errConn := tcp.ConnectToTCPServer(serverTry, c.Options.RelayPassword, c.Options.RoomName, 500*time.Millisecond)
+				conn, banner2, externalIP, _, errConn := tcp.ConnectToTCPServerControlContext(c.stop.ctx, serverTry, c.Options.RelayPassword, c.Options.RoomName, 500*time.Millisecond)
 				if errConn != nil {
 					log.Debug(c.redactError(errConn))
 					log.Debug("could not connect to " + serverTry)
@@ -2201,6 +2268,10 @@ func (c *Client) transfer() (err error) {
 		data, err = c.connection(0).Receive()
 		if err != nil {
 			log.Debugf("got error receiving: %v", c.redactError(err))
+			if ctxErr := c.ctxErr(); ctxErr != nil {
+				err = ctxErr
+				break
+			}
 			select {
 			case reportedErr := <-attempt.errc:
 				err = reportedErr
@@ -2296,6 +2367,10 @@ func (c *Client) transfer() (err error) {
 // ZIP manifest and size validation must succeed before any member is committed.
 // The received archive remains recoverable if validation or extraction fails.
 func (c *Client) extractReceivedArchives() error {
+	ctx := context.Background()
+	if c.stop != nil && c.stop.ctx != nil {
+		ctx = c.stop.ctx
+	}
 	root, err := c.receiveFilesystem()
 	if err != nil {
 		return err
@@ -2314,9 +2389,12 @@ func (c *Client) extractReceivedArchives() error {
 		}
 		archiveInfo, statErr := archive.Stat()
 		if statErr == nil {
-			statErr = utils.UnzipDirectoryFromFileAtRootWithLimit(root, archive, archiveInfo.Size())
+			statErr = utils.UnzipDirectoryFromFileAtRootWithLimitContext(ctx, root, archive, archiveInfo.Size())
 		}
 		closeErr := archive.Close()
+		if errors.Is(statErr, context.Canceled) || errors.Is(statErr, context.DeadlineExceeded) {
+			return statErr
+		}
 		if statErr != nil || closeErr != nil {
 			return errors.New("received archive failed validation or extraction")
 		}
@@ -2455,8 +2533,11 @@ func (c *Client) processSenderInfo(senderInfo SenderInfo) (done bool, err error)
 				fmt.Fprintf(output, "\r%s %s (%s)? %s ", action, fname, utils.ByteCountDecimal(totalSize), choicePrompt)
 			}
 		}
-		choice, errInput := utils.GetInput("")
+		choice, errInput := utils.GetInputContext(c.clientContext(), "")
 		choice = strings.ToLower(choice)
+		if errors.Is(errInput, context.Canceled) || errors.Is(errInput, context.DeadlineExceeded) {
+			return true, errInput
+		}
 		if errInput != nil || (choice != "" && choice != "y" && choice != "yes") {
 			err = message.Send(c.connection(0), c.Key, message.Message{
 				Type:    message.TypeError,
@@ -2498,7 +2579,10 @@ func (c *Client) processSenderInfo(senderInfo SenderInfo) (done bool, err error)
 					termui.Warning("overwrite", colorEnabled),
 					termui.PromptChoices("(y/N)", colorEnabled),
 				)
-				choice, _ := utils.GetInput("")
+				choice, inputErr := utils.GetInputContext(c.clientContext(), "")
+				if errors.Is(inputErr, context.Canceled) || errors.Is(inputErr, context.DeadlineExceeded) {
+					return false, inputErr
+				}
 				choice = strings.ToLower(choice)
 				if choice == "y" || choice == "yes" {
 					err = c.createEmptyFolder(i)
@@ -2730,7 +2814,8 @@ func (c *Client) openRelayDataChannels(attempt *transferAttemptState, indices []
 			defer wg.Done()
 			server := net.JoinHostPort(relayHost, c.Options.RelayPorts[j])
 			log.Debugf("connecting to %s", server)
-			dataConn, _, _, fast, connErr := tcp.ConnectToTCPServerWithCapability(
+			dataConn, _, _, fast, connErr := tcp.ConnectToTCPServerWithCapabilityContext(
+				c.stop.ctx,
 				server,
 				c.Options.RelayPassword,
 				fmt.Sprintf("%s-%d", c.Options.RoomName, j),
@@ -2924,8 +3009,13 @@ func (c *Client) processMessage(payload []byte, attempt *transferAttemptState) (
 				remoteFile.MachineID,
 				termui.PromptChoices("(Y/n)", colorEnabled),
 			)
-			choice, errInput := utils.GetInput("")
+			choice, errInput := utils.GetInputContext(c.clientContext(), "")
 			choice = strings.ToLower(choice)
+			if errors.Is(errInput, context.Canceled) || errors.Is(errInput, context.DeadlineExceeded) {
+				done = true
+				err = errInput
+				return
+			}
 			if errInput != nil || (choice != "" && choice != "y" && choice != "yes") {
 				err = message.Send(c.connection(0), c.Key, message.Message{
 					Type:    message.TypeError,
@@ -3149,35 +3239,7 @@ func (c *Client) recipientGetFileReady(finished bool) (err error) {
 }
 
 func formatDescription(description string) string {
-	const (
-		// Reserve extra room for variable progress metadata such as [elapsed:remaining].
-		progressMetaWidth = 78
-		minDescription    = 12
-		defaultTermWidth  = 80
-	)
-
-	width, _, err := term.GetSize(int(os.Stderr.Fd()))
-	if err != nil || width <= 0 {
-		width, _, err = term.GetSize(int(os.Stdout.Fd()))
-	}
-	if err != nil || width <= 0 {
-		if envColumns, convErr := strconv.Atoi(os.Getenv("COLUMNS")); convErr == nil && envColumns > 0 {
-			width = envColumns
-		} else {
-			width = defaultTermWidth
-		}
-	}
-
-	maxDescription := max(width-progressMetaWidth, minDescription)
-
-	runes := []rune(description)
-	if len(runes) > maxDescription {
-		if maxDescription <= 3 {
-			return string(runes[:maxDescription])
-		}
-		return string(runes[:maxDescription-3]) + "..."
-	}
-	return description
+	return termui.FitProgressDescription(description)
 }
 
 func (c *Client) createEmptyFileAndFinish(fileInfo FileInfo, i int) (err error) {
@@ -3233,10 +3295,10 @@ func (c *Client) createEmptyFileAndFinish(fileInfo FileInfo, i int) (err error) 
 	return
 }
 
-var receiveFileHash = utils.HashFile
-var receiveOverwriteInput = utils.GetInput
+var receiveFileHash = utils.HashFileCtx
+var receiveOverwriteInput = utils.GetInputContext
 
-func askReceiveOverwrite(fileInfo FileInfo, resumable bool) bool {
+func askReceiveOverwrite(ctx context.Context, fileInfo FileInfo, resumable bool) (bool, error) {
 	action := "Overwrite"
 	promptDetail := ""
 	promptSpacing := " "
@@ -3274,13 +3336,16 @@ func askReceiveOverwrite(fileInfo FileInfo, resumable bool) bool {
 		styledChoice,
 		promptSpacing,
 	)
-	choice, _ := receiveOverwriteInput("")
+	choice, inputErr := receiveOverwriteInput(ctx, "")
+	if errors.Is(inputErr, context.Canceled) || errors.Is(inputErr, context.DeadlineExceeded) {
+		return false, inputErr
+	}
 	choice = strings.ToLower(choice)
 	if choice != "y" && choice != "yes" {
 		fmt.Fprintf(output, "Skipping %s\n", quotedFilename(destination, colorEnabled))
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
 func (c *Client) updateIfRecipientHasFileInfo() (err error) {
@@ -3316,7 +3381,7 @@ func (c *Client) updateIfRecipientHasFileInfo() (err error) {
 		var fileHash []byte
 		if destinationExists && fileInfo.Size > 0 && fileInfo.Symlink == "" && recipientFileInfo.Mode().IsRegular() && recipientFileInfo.Size() == fileInfo.Size {
 			// the file exists, but is same size, so hash it
-			fileHash, err = receiveFileHash(destination, c.Options.HashAlgorithm, !c.Options.SendingText)
+			fileHash, err = receiveFileHash(c.clientContext(), destination, c.Options.HashAlgorithm, !c.Options.SendingText)
 			if err != nil {
 				return fmt.Errorf("hash existing destination %q: %w", destination, err)
 			}
@@ -3356,7 +3421,11 @@ func (c *Client) updateIfRecipientHasFileInfo() (err error) {
 			}
 			if destinationExists && !c.Options.Overwrite && !c.Options.Rename && !isStdinName {
 				resumable := fileInfo.Size > 0 && fileInfo.Symlink == "" && recipientFileInfo.Mode().IsRegular()
-				if !askReceiveOverwrite(fileInfo, resumable) {
+				overwrite, promptErr := askReceiveOverwrite(c.clientContext(), fileInfo, resumable)
+				if promptErr != nil {
+					return promptErr
+				}
+				if !overwrite {
 					continue
 				}
 			}
@@ -3704,7 +3773,14 @@ func (c *Client) sendData(i int, dataConn *comm.Comm, fread *os.File, queue *req
 		if c.limiter != nil {
 			r := c.limiter.ReserveN(time.Now(), n)
 			log.Debugf("Limiting Upload for %d", r.Delay())
-			time.Sleep(r.Delay())
+			timer := time.NewTimer(r.Delay())
+			select {
+			case <-timer.C:
+			case <-c.stop.ctx.Done():
+				r.Cancel()
+				timer.Stop()
+				return
+			}
 		}
 		if n > 0 {
 			binary.LittleEndian.PutUint64(payload[:8], uint64(readingPos))

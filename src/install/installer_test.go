@@ -88,6 +88,7 @@ func TestInstallerBuildsReleaseAssetURLsFromDynamicVersion(t *testing.T) {
 		`croc_checksum_file="${croc_bin_name}_v${croc_version}_checksums.txt"`,
 		`croc_url="${croc_base_url}/v${croc_version}/${croc_file}"`,
 		`croc_checksum_url="${croc_base_url}/v${croc_version}/${croc_checksum_file}"`,
+		`"${prefix}/${croc_bin_name}" update --register-installer`,
 	} {
 		if !strings.Contains(script, fragment) {
 			t.Fatalf("installer does not contain URL construction %q", fragment)

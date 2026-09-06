@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
@@ -538,6 +539,29 @@ func TestMarkedArchiveRequiresCompleteValidationBeforeExtraction(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(filepath.Dir(receiveDirectory), "escaped.txt")); !os.IsNotExist(statErr) {
 		t.Fatalf("archive escaped the receive root: %v", statErr)
+	}
+}
+
+func TestMarkedArchiveCancellationRetainsArchive(t *testing.T) {
+	receiveDirectory := t.TempDir()
+	t.Chdir(receiveDirectory)
+	archivePath := filepath.Join(receiveDirectory, "candidate.zip")
+	writeTestZip(t, archivePath, map[string]string{"payload.txt": "payload"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &Client{
+		FilesToTransfer: []FileInfo{{Name: "candidate.zip", FolderRemote: ".", TempFile: true}},
+		stop:            newStop(ctx),
+	}
+	defer client.closeReceiveFilesystem()
+
+	err := client.extractReceivedArchives()
+	assert.ErrorIs(t, err, context.Canceled)
+	if _, statErr := os.Stat(archivePath); statErr != nil {
+		t.Fatalf("canceled extraction did not retain its archive: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(receiveDirectory, "payload.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("canceled extraction committed output: %v", statErr)
 	}
 }
 
@@ -1358,6 +1382,91 @@ func TestGetFilesInfoExactFileExclusion(t *testing.T) {
 		if !got[want] {
 			t.Errorf("expected %q to be returned; got %v", want, got)
 		}
+	}
+}
+
+func TestGetFilesInfoContextReturnsCanceledBeforeWalking(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	_, _, _, err := GetFilesInfoContext(ctx, []string{t.TempDir()}, false, false, nil)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Less(t, time.Since(started), 500*time.Millisecond)
+}
+
+func TestNewCtxCancellationClosesBlockedControlConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client, err := NewCtx(ctx, Options{IsSender: true, SharedSecret: "cancel-blocked-control", Curve: "p256"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, peer := net.Pipe()
+	defer peer.Close()
+	client.setConnection(0, comm.New(local))
+	result := make(chan error, 1)
+	go func() { result <- client.transfer() }()
+	time.Sleep(10 * time.Millisecond)
+	started := time.Now()
+	cancel()
+	select {
+	case err = <-result:
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("blocked control receive did not stop after cancellation")
+	}
+}
+
+func TestReceiveCancellationClosesPendingRelayConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	closed := make(chan struct{})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		close(accepted)
+		_, _ = io.Copy(io.Discard, connection)
+		_ = connection.Close()
+		close(closed)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	client, err := NewCtx(ctx, Options{
+		SharedSecret:  "cancel-pending-receive",
+		RelayAddress:  listener.Addr().String(),
+		RelayPassword: "pass",
+		DisableLocal:  true,
+		Curve:         "p256",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- client.Receive() }()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("receiver did not open its relay connection")
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case err = <-result:
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("receiver did not stop after cancellation")
+	}
+	select {
+	case <-closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("receiver cancellation did not close the relay connection")
 	}
 }
 

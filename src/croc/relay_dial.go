@@ -71,7 +71,7 @@ func raceRelayTCP(ctx context.Context, addresses []string, timeout, stagger time
 					return
 				}
 			}
-			connection, err := comm.NewConnection(address, timeout)
+			connection, err := comm.NewConnectionContext(ctx, address, timeout)
 			result := rawRelayDialResult{connection: connection, address: address, err: err}
 			select {
 			case results <- result:
@@ -115,13 +115,17 @@ func (c *Client) connectRelayControlContext(ctx context.Context, addresses ...st
 	stopClose := context.AfterFunc(ctx, connection.Close)
 	banner, externalIP, capability, err := tcp.HandshakeTCPServerCapability(connection, c.Options.RelayPassword, c.Options.RoomName)
 	closeStopped := stopClose()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		connection.Close()
+		return relayControlResult{}, ctxErr
+	}
 	if err != nil {
 		connection.Close()
 		return relayControlResult{}, err
 	}
-	if !closeStopped || ctx.Err() != nil {
+	if !closeStopped {
 		connection.Close()
-		return relayControlResult{}, ctx.Err()
+		return relayControlResult{}, context.Canceled
 	}
 	return relayControlResult{
 		connection: connection,

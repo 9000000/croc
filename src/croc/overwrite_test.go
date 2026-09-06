@@ -1,6 +1,8 @@
 package croc
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -31,13 +33,22 @@ func overwriteTestClient(t *testing.T, file FileInfo, options Options) *Client {
 	return client
 }
 
+func TestReceiveOverwritePromptHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	overwrite, err := askReceiveOverwrite(ctx, FileInfo{Name: "payload", FolderRemote: "."}, false)
+	if overwrite || !errors.Is(err, context.Canceled) {
+		t.Fatalf("askReceiveOverwrite() = (%v, %v), want (false, context.Canceled)", overwrite, err)
+	}
+}
+
 func TestSizeZeroOverwriteRequiresApproval(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.WriteFile(".bashrc", []byte("keep me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	originalInput := receiveOverwriteInput
-	receiveOverwriteInput = func(string) (string, error) { return "n", nil }
+	receiveOverwriteInput = func(context.Context, string) (string, error) { return "n", nil }
 	t.Cleanup(func() { receiveOverwriteInput = originalInput })
 
 	client := overwriteTestClient(t, FileInfo{Name: ".bashrc", FolderRemote: ".", Size: 0}, Options{
@@ -77,7 +88,7 @@ func TestIncomingSymlinkOverwriteRequiresApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	originalInput := receiveOverwriteInput
-	receiveOverwriteInput = func(string) (string, error) { return "n", nil }
+	receiveOverwriteInput = func(context.Context, string) (string, error) { return "n", nil }
 	t.Cleanup(func() { receiveOverwriteInput = originalInput })
 
 	client := overwriteTestClient(t, FileInfo{Name: "destination", FolderRemote: ".", Symlink: "target"}, Options{HashAlgorithm: defaultHashAlgorithm})
@@ -93,7 +104,7 @@ func TestIncomingSymlinkOverwriteRequiresApproval(t *testing.T) {
 func TestNewSizeZeroFileDoesNotPrompt(t *testing.T) {
 	t.Chdir(t.TempDir())
 	originalInput := receiveOverwriteInput
-	receiveOverwriteInput = func(string) (string, error) {
+	receiveOverwriteInput = func(context.Context, string) (string, error) {
 		t.Fatal("overwrite prompt called for new file")
 		return "", nil
 	}

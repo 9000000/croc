@@ -792,6 +792,11 @@ main() {
 
   if [[ "${install_file_rcode}" == "0" ]] ; then
     print_message "== Installed ${croc_bin_name} to ${prefix}/" "ok"
+    if "${prefix}/${croc_bin_name}" update --register-installer >/dev/null 2>&1; then
+      print_message "== Registered this standalone installation for safe self-updates" "ok"
+    else
+      print_message "== Could not register this installation for self-updates" "warn"
+    fi
   elif [[ "${install_file_rcode}" == "1" ]]; then
     print_message "== Failed to install ${croc_bin_name}" "error"
     exit 1

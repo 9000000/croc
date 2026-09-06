@@ -13,7 +13,7 @@
   },
   "index": {
     "title": "croc field notes: secure file transfer explained",
-    "description": "Notes and release updates from inside croc: terminal sharing, speed tests, live relays, PAKE encryption, browser transfers, temporary storage, and what changed in each version.",
+    "description": "Notes and release updates from inside croc: safe self-updates, terminal sharing, speed tests, live relays, PAKE encryption, browser transfers, and what changed in each version.",
     "keywords": [
       "croc blog",
       "croc release notes",
@@ -29,6 +29,35 @@
   },
   "posts": [
     {
+      "slug": "croc-v11-5-release-update",
+      "title": "croc v11.5 can update itself",
+      "seoTitle": "croc v11.5: Safe Self-Updates and Clearer SSH Sessions",
+      "description": "croc v11.5 adds safe self-updates and makes shared SSH sessions clearer when they start, reconnect, or end.",
+      "kind": "update",
+      "category": "Release notes",
+      "publishedAt": "2026-09-05",
+      "modifiedAt": "2026-09-05",
+      "wordCount": 811,
+      "readingMinutes": 4,
+      "relatedSlugs": [
+        "croc-v11-4-release-update",
+        "share-terminal-with-croc-ssh"
+      ],
+      "keywords": [
+        "croc v11.5",
+        "croc release notes",
+        "croc update",
+        "croc self-update",
+        "safe software updates",
+        "croc ssh",
+        "shared terminal",
+        "SSH reconnect"
+      ],
+      "image": "/blog/images/croc-v11-5-release-update.webp",
+      "socialImage": "/blog/images/croc-v11-5-release-update.jpg",
+      "imageAlt": "Three black-and-white panels show a version check, a verified standalone update, and a shared SSH terminal ending clearly in croc v11.5."
+    },
+    {
       "slug": "croc-v11-4-release-update",
       "title": "croc v11.4 shares the terminal",
       "seoTitle": "croc v11.4: Secure Terminal Sharing from CLI and Browser",
@@ -37,8 +66,8 @@
       "category": "Release notes",
       "publishedAt": "2026-09-03",
       "modifiedAt": "2026-09-03",
-      "wordCount": 896,
-      "readingMinutes": 5,
+      "wordCount": 774,
+      "readingMinutes": 4,
       "relatedSlugs": [
         "share-terminal-with-croc-ssh",
         "croc-v11-3-release-update"
