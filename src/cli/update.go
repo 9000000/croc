@@ -87,8 +87,11 @@ func updateCommand(c *internalcli.Context) error {
 		return nil
 	}
 	if !c.Bool("yes") {
-		choice, promptErr := utils.GetInput(fmt.Sprintf("Update croc from v%s to v%s? (y/N) ", Version, latest))
+		choice, promptErr := utils.GetInputContext(c.Context, fmt.Sprintf("Update croc from v%s to v%s? (y/N) ", Version, latest))
 		if promptErr != nil {
+			if ctxErr := c.Context.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return errors.New("update confirmation requires an interactive terminal; rerun with --yes")
 		}
 		if !strings.EqualFold(choice, "y") && !strings.EqualFold(choice, "yes") {

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,7 +266,7 @@ func sendStored(c *cli.Context) error {
 
 	client := new(storeclient.Client)
 	result, err := client.UploadWithOptions(
-		context.Background(),
+		c.Context,
 		strings.TrimSpace(c.String("store-url")),
 		paths,
 		storeclient.UploadOptions{Downloads: downloads, Expiration: expiration},
@@ -326,7 +325,7 @@ func receiveStored(c *cli.Context, value string) error {
 		return errors.New("--stdout is not supported for stored transfers")
 	}
 	client := new(storeclient.Client)
-	manifest, expires, err := client.Inspect(context.Background(), share)
+	manifest, expires, err := client.Inspect(c.Context, share)
 	if err != nil {
 		return err
 	}
@@ -362,7 +361,7 @@ func receiveStored(c *cli.Context, value string) error {
 			if c.Bool("yes") {
 				return fmt.Errorf("destination already exists (use --overwrite): %s", destination)
 			}
-			choice, inputErr := utils.GetInput(fmt.Sprintf(
+			choice, inputErr := utils.GetInputContext(c.Context, fmt.Sprintf(
 				"Replace %s? (y/N) ",
 				termui.Filename(destination, colorEnabled),
 			))
@@ -372,7 +371,7 @@ func receiveStored(c *cli.Context, value string) error {
 		}
 	}
 	if !c.Bool("yes") {
-		choice, inputErr := utils.GetInput("Receive these files? (Y/n) ")
+		choice, inputErr := utils.GetInputContext(c.Context, "Receive these files? (Y/n) ")
 		if inputErr != nil {
 			return inputErr
 		}
@@ -382,7 +381,7 @@ func receiveStored(c *cli.Context, value string) error {
 		}
 	}
 	err = client.Receive(
-		context.Background(),
+		c.Context,
 		share,
 		manifest,
 		output,
@@ -419,7 +418,7 @@ func revokeStored(c *cli.Context, transferID string) error {
 		ID:        receipt.ID,
 		MasterKey: make([]byte, storecrypto.KeySize),
 	}
-	err = new(storeclient.Client).Revoke(context.Background(), share, receipt.UploadToken)
+	err = new(storeclient.Client).Revoke(c.Context, share, receipt.UploadToken)
 	var httpErr *storeclient.HTTPError
 	if err != nil && !(errors.As(err, &httpErr) &&
 		(httpErr.StatusCode == http.StatusGone || httpErr.StatusCode == http.StatusNotFound)) {

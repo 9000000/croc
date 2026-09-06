@@ -2,11 +2,13 @@ package utils
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -27,6 +29,56 @@ import (
 const TCP_BUFFER_SIZE = 1024 * 64
 
 var bigFileSize = 75000000
+
+type blockingInputReader struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingInputReader) Read([]byte) (int, error) {
+	select {
+	case <-r.started:
+	default:
+		close(r.started)
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
+func TestGetInputContextCancelsBlockedRead(t *testing.T) {
+	reader := &blockingInputReader{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(reader.release)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := getInputContext(ctx, bufio.NewReader(reader), "")
+		result <- err
+	}()
+	<-reader.started
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-result:
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("blocked prompt did not return after cancellation")
+	}
+}
+
+func TestZipDirectoryContextRemovesCanceledArchive(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "file.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "archive.zip")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := ZipDirectoryContext(ctx, destination, source, nil, nil)
+	assert.ErrorIs(t, err, context.Canceled)
+	_, statErr := os.Stat(destination)
+	assert.True(t, os.IsNotExist(statErr), "canceled zip left %s behind", destination)
+}
 
 func bigFile() {
 	os.WriteFile("bigfile.test", bytes.Repeat([]byte("z"), bigFileSize), 0o666)

@@ -215,11 +215,12 @@ func (s *server) run() (err error) {
 	}
 	log.Infof("starting TCP server on %s", addr)
 	lc := net.ListenConfig{}
-	s.stop.server, err = lc.Listen(s.stop.ctx, network, addr)
+	listener, err := lc.Listen(s.stop.ctx, network, addr)
 	if err != nil {
 		return fmt.Errorf("error listening on %s: %w", addr, err)
 	}
-	defer s.stop.server.Close()
+	s.stop.setServer(listener)
+	defer listener.Close()
 	close(s.started)
 
 	go func() {
@@ -237,7 +238,7 @@ func (s *server) run() (err error) {
 
 	// spawn a new goroutine whenever a client connects
 	for {
-		connection, err := s.stop.server.Accept()
+		connection, err := listener.Accept()
 		if err != nil {
 			return fmt.Errorf("problem accepting connection: %w", err)
 		}
@@ -361,9 +362,9 @@ func (s *server) deleteOldRooms() {
 			}
 			s.rooms.Unlock()
 		case <-s.stop.ctx.Done():
-			if s.server != nil {
-				log.Debugf("stop TCP server on %s", s.server.Addr())
-				s.server.Close()
+			if server := s.getServer(); server != nil {
+				log.Debugf("stop TCP server on %s", server.Addr())
+				server.Close()
 				time.Sleep(time.Millisecond)
 			}
 			log.Debug("stop room cleanup fired")
@@ -848,14 +849,22 @@ func ConnectToTCPServerControlContext(ctx context.Context, address, password, ro
 // ConnectToTCPServerWithCapability uses the optional upgraded-relay fast path
 // and transparently reconnects with the legacy PAKE handshake on rejection.
 func ConnectToTCPServerWithCapability(address, password, room, capability string, timelimit ...time.Duration) (c *comm.Comm, banner string, ipaddr string, fast bool, err error) {
+	return ConnectToTCPServerWithCapabilityContext(context.Background(), address, password, room, capability, timelimit...)
+}
+
+// ConnectToTCPServerWithCapabilityContext is
+// ConnectToTCPServerWithCapability with cancellation support.
+func ConnectToTCPServerWithCapabilityContext(ctx context.Context, address, password, room, capability string, timelimit ...time.Duration) (c *comm.Comm, banner string, ipaddr string, fast bool, err error) {
 	defer func() { err = redact.Error(err, password, room, capability) }()
 	if capability != "" {
 		timeout := 30 * time.Second
 		if len(timelimit) > 0 {
 			timeout = timelimit[0]
 		}
-		c, err = comm.NewConnection(address, timeout)
+		c, err = comm.NewConnectionContext(ctx, address, timeout)
 		if err == nil {
+			stopClose := context.AfterFunc(ctx, c.Close)
+			defer stopClose()
 			var request []byte
 			request, err = encodeFastAdmissionRequest(capability, room)
 			if err == nil {
@@ -865,6 +874,10 @@ func ConnectToTCPServerWithCapability(address, password, room, capability string
 				var confirmation []byte
 				confirmation, err = c.Receive()
 				if err == nil && bytes.Equal(confirmation, []byte("ok")) {
+					if !stopClose() || ctx.Err() != nil {
+						c.Close()
+						return nil, "", "", false, ctx.Err()
+					}
 					return c, "", "", true, nil
 				}
 				if err == nil && bytes.Equal(confirmation, []byte("rate limited")) {
@@ -876,11 +889,12 @@ func ConnectToTCPServerWithCapability(address, password, room, capability string
 					return nil, "", "", false, errors.New("relay room full")
 				}
 			}
+			stopClose()
 			c.Close()
 		}
 		log.Debug("fast relay admission unavailable; retrying legacy handshake")
 	}
-	c, banner, ipaddr, err = ConnectToTCPServer(address, password, room, timelimit...)
+	c, banner, ipaddr, _, err = ConnectToTCPServerControlContext(ctx, address, password, room, timelimit...)
 	return c, banner, ipaddr, false, err
 }
 

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/flate"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
@@ -121,15 +122,68 @@ var stdinReader = bufio.NewReader(os.Stdin)
 // exhausted stdin) the returned string is empty, so callers that treat
 // an empty answer as consent must check the error.
 func GetInput(prompt string) (string, error) {
+	return GetInputContext(context.Background(), prompt)
+}
+
+// GetInputContext returns one line of input from stdin, or the context error
+// when the caller is canceled while waiting for input. The read runs in a
+// goroutine because terminals and arbitrary pipes do not provide a portable
+// context-aware read operation. A canceled CLI process exits without waiting
+// for that goroutine.
+func GetInputContext(ctx context.Context, prompt string) (string, error) {
+	return getInputContext(ctx, stdinReader, prompt)
+}
+
+func getInputContext(ctx context.Context, reader *bufio.Reader, prompt string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	output, colorEnabled := termui.Output(os.Stderr)
 	fmt.Fprint(output, termui.PromptChoices(prompt, colorEnabled))
-	text, err := stdinReader.ReadString('\n')
-	text = strings.TrimSpace(text)
-	if errors.Is(err, io.EOF) && text != "" {
-		// a final line without a trailing newline is still a valid answer
-		err = nil
+	type inputResult struct {
+		text string
+		err  error
 	}
-	return text, err
+	result := make(chan inputResult, 1)
+	go func() {
+		text, err := reader.ReadString('\n')
+		text = strings.TrimSpace(text)
+		if errors.Is(err, io.EOF) && text != "" {
+			// A final line without a trailing newline is still a valid answer.
+			err = nil
+		}
+		result <- inputResult{text: text, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case input := <-result:
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return input.text, input.err
+	}
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(buffer)
+	if err == nil {
+		if ctxErr := r.ctx.Err(); ctxErr != nil {
+			return n, ctxErr
+		}
+	}
+	return n, err
 }
 
 // HashFile returns the hash of a file or, in case of a symlink, the
@@ -294,10 +348,20 @@ func SHA256(s string) string {
 
 // PublicIP returns public ip address
 func PublicIP() (ip string, err error) {
+	return PublicIPContext(context.Background())
+}
+
+// PublicIPContext returns the public IPv4 address while allowing the caller to
+// cancel the lookup.
+func PublicIPContext(ctx context.Context) (ip string, err error) {
 	// ask ipv4.icanhazip.com for the public ip
 	// by making http request
 	// if the request fails, return nothing
-	resp, err := http.Get("http://ipv4.icanhazip.com")
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://ipv4.icanhazip.com", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return
 	}
@@ -636,13 +700,31 @@ func IsLocalIP(ipaddress string) bool {
 // any string in exclusions (case-insensitive) are also skipped, mirroring
 // the post-walk filter in cli.go for non-zip transfers.
 func ZipDirectory(destination string, source string, ignoredPaths map[string]bool, exclusions []string) (err error) {
-	return ZipDirectoryWithExactExclusions(destination, source, ignoredPaths, exclusions, nil)
+	return ZipDirectoryContext(context.Background(), destination, source, ignoredPaths, exclusions)
+}
+
+// ZipDirectoryContext is ZipDirectory with cancellation support.
+func ZipDirectoryContext(ctx context.Context, destination string, source string, ignoredPaths map[string]bool, exclusions []string) (err error) {
+	return ZipDirectoryWithExactExclusionsContext(ctx, destination, source, ignoredPaths, exclusions, nil)
 }
 
 // ZipDirectoryWithExactExclusions is ZipDirectory with support for exact
 // paths relative to source. Legacy exclusions remain case-insensitive
 // substring matches.
 func ZipDirectoryWithExactExclusions(destination string, source string, ignoredPaths map[string]bool, exclusions, exactExclusions []string) (err error) {
+	return ZipDirectoryWithExactExclusionsContext(context.Background(), destination, source, ignoredPaths, exclusions, exactExclusions)
+}
+
+// ZipDirectoryWithExactExclusionsContext is
+// ZipDirectoryWithExactExclusions with cancellation support. A canceled or
+// otherwise failed operation removes the incomplete destination archive.
+func ZipDirectoryWithExactExclusionsContext(ctx context.Context, destination string, source string, ignoredPaths map[string]bool, exclusions, exactExclusions []string) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
 	if _, err = os.Stat(destination); err == nil {
 		log.Errorf("%s file already exists!\n", destination)
 		return fmt.Errorf("file already exists: %s", destination)
@@ -672,6 +754,11 @@ func ZipDirectoryWithExactExclusions(destination string, source string, ignoredP
 		log.Error(err)
 		return fmt.Errorf("failed to create zip file: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(destination)
+		}
+	}()
 	defer file.Close()
 	if resolvedDestinationAbs, resolveErr := filepath.EvalSymlinks(destinationAbs); resolveErr == nil {
 		destinationAbs = resolvedDestinationAbs
@@ -710,6 +797,9 @@ func ZipDirectoryWithExactExclusions(destination string, source string, ignoredP
 
 	// Second pass: add all other directories and files
 	err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			log.Error(err)
 			return nil
@@ -825,8 +915,11 @@ func ZipDirectoryWithExactExclusions(destination string, source string, ignoredP
 				return nil
 			}
 
-			if _, err := io.Copy(w1, f1); err != nil {
-				log.Error(err)
+			if _, copyErr := io.Copy(w1, &contextReader{ctx: ctx, reader: f1}); copyErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				log.Error(copyErr)
 				return nil
 			}
 
@@ -909,6 +1002,11 @@ var ErrUnzipSizeLimit = errors.New("zip extraction size limit exceeded")
 // limited to the archive's on-disk size. Croc-created zip archives use deflate
 // without compression, so their extracted contents fit within this limit.
 func UnzipDirectory(destination string, source string) error {
+	return UnzipDirectoryContext(context.Background(), destination, source)
+}
+
+// UnzipDirectoryContext is UnzipDirectory with cancellation support.
+func UnzipDirectoryContext(ctx context.Context, destination string, source string) error {
 	archiveFile, err := os.Open(source)
 	if err != nil {
 		return fmt.Errorf("failed to open zip file: %w", err)
@@ -918,12 +1016,18 @@ func UnzipDirectory(destination string, source string) error {
 	if err != nil {
 		return fmt.Errorf("failed to inspect zip file: %w", err)
 	}
-	return unzipDirectoryFromReaderWithLimit(destination, nil, archiveFile, archiveInfo.Size(), archiveInfo.Size())
+	return unzipDirectoryFromReaderWithLimit(ctx, destination, nil, archiveFile, archiveInfo.Size(), archiveInfo.Size())
 }
 
 // UnzipDirectoryWithLimit extracts source into destination while allowing at
 // most maxExtractedBytes bytes of regular-file output in total.
 func UnzipDirectoryWithLimit(destination string, source string, maxExtractedBytes int64) error {
+	return UnzipDirectoryWithLimitContext(context.Background(), destination, source, maxExtractedBytes)
+}
+
+// UnzipDirectoryWithLimitContext is UnzipDirectoryWithLimit with cancellation
+// support.
+func UnzipDirectoryWithLimitContext(ctx context.Context, destination string, source string, maxExtractedBytes int64) error {
 	if maxExtractedBytes <= 0 {
 		return fmt.Errorf("maximum extracted size must be positive: %d", maxExtractedBytes)
 	}
@@ -937,13 +1041,19 @@ func UnzipDirectoryWithLimit(destination string, source string, maxExtractedByte
 	if err != nil {
 		return fmt.Errorf("failed to inspect zip file: %w", err)
 	}
-	return unzipDirectoryFromReaderWithLimit(destination, nil, archiveFile, archiveInfo.Size(), maxExtractedBytes)
+	return unzipDirectoryFromReaderWithLimit(ctx, destination, nil, archiveFile, archiveInfo.Size(), maxExtractedBytes)
 }
 
 // UnzipDirectoryFromFileAtRootWithLimit extracts through the caller's already
 // opened receive root, so a renamed or replaced working-directory path cannot
 // switch the extraction destination after the transfer began.
 func UnzipDirectoryFromFileAtRootWithLimit(root *receivefs.Root, source *os.File, maxExtractedBytes int64) error {
+	return UnzipDirectoryFromFileAtRootWithLimitContext(context.Background(), root, source, maxExtractedBytes)
+}
+
+// UnzipDirectoryFromFileAtRootWithLimitContext is
+// UnzipDirectoryFromFileAtRootWithLimit with cancellation support.
+func UnzipDirectoryFromFileAtRootWithLimitContext(ctx context.Context, root *receivefs.Root, source *os.File, maxExtractedBytes int64) error {
 	if root == nil {
 		return errors.New("zip receive root is required")
 	}
@@ -954,22 +1064,29 @@ func UnzipDirectoryFromFileAtRootWithLimit(root *receivefs.Root, source *os.File
 	if err != nil {
 		return fmt.Errorf("failed to inspect zip file: %w", err)
 	}
-	return unzipDirectoryFromReaderWithLimit("", root, source, archiveInfo.Size(), maxExtractedBytes)
+	return unzipDirectoryFromReaderWithLimit(ctx, "", root, source, archiveInfo.Size(), maxExtractedBytes)
 }
 
 func unzipDirectoryFromReaderWithLimit(
+	ctx context.Context,
 	destination string,
 	receiveRoot *receivefs.Root,
 	source io.ReaderAt,
 	sourceSize int64,
 	maxExtractedBytes int64,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	archive, err := zip.NewReader(source, sourceSize)
 	if err != nil {
 		return fmt.Errorf("failed to open zip file: %w", err)
 	}
 
-	normalized, err := validateZipEntries(archive.File, maxExtractedBytes)
+	normalized, err := validateZipEntriesContext(ctx, archive.File, maxExtractedBytes)
 	if err != nil {
 		return err
 	}
@@ -986,6 +1103,9 @@ func unzipDirectoryFromReaderWithLimit(
 		defer root.Close()
 	}
 	for _, entry := range normalized {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		if err = root.RejectSymlinkPath(entry.Path); err != nil {
 			return fmt.Errorf("symlink destination path component in zip entry %q: %w", entry.Path, err)
 		}
@@ -1001,6 +1121,9 @@ func unzipDirectoryFromReaderWithLimit(
 	selected := make([]bool, len(archive.File))
 
 	for i, f := range archive.File {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		filePath := normalized[i].Path
 		fmt.Fprintf(os.Stderr, "\r\033[2K")
 		fmt.Fprintf(os.Stderr, "\rUnzipping file %s", filePath)
@@ -1021,7 +1144,10 @@ func unzipDirectoryFromReaderWithLimit(
 
 		if _, statErr := root.Stat(filePath); statErr == nil {
 			prompt := fmt.Sprintf("\nOverwrite '%s'? (y/N) ", filePath)
-			choice, _ := GetInput(prompt)
+			choice, inputErr := GetInputContext(ctx, prompt)
+			if inputErr != nil {
+				return inputErr
+			}
 			choice = strings.ToLower(choice)
 			if choice != "y" && choice != "yes" {
 				fmt.Fprintf(os.Stderr, "Skipping '%s'\n", filePath)
@@ -1051,7 +1177,7 @@ func unzipDirectoryFromReaderWithLimit(
 			return fmt.Errorf("create staging file for zip entry %q: %w", f.Name, err)
 		}
 
-		_, copyErr := copyWithExtractedSizeLimit(dstFile, fileInArchive, &remainingExtractedBytes)
+		_, copyErr := copyWithExtractedSizeLimit(dstFile, &contextReader{ctx: ctx, reader: fileInArchive}, &remainingExtractedBytes)
 		archiveCloseErr := fileInArchive.Close()
 		if copyErr == nil {
 			copyErr = dstFile.Sync()
@@ -1075,6 +1201,9 @@ func unzipDirectoryFromReaderWithLimit(
 
 	// Commit directories before files, always through the opened root.
 	for i, entry := range normalized {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		if selected[i] && entry.Kind == receivefs.KindDirectory {
 			if err = root.MkdirAll(entry.Path, 0o755); err != nil {
 				return fmt.Errorf("commit zip directory %q: %w", entry.Path, err)
@@ -1082,6 +1211,9 @@ func unzipDirectoryFromReaderWithLimit(
 		}
 	}
 	for i, entry := range normalized {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		if !selected[i] || entry.Kind != receivefs.KindFile {
 			continue
 		}
@@ -1093,6 +1225,9 @@ func unzipDirectoryFromReaderWithLimit(
 		}
 	}
 	for i, entry := range normalized {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		if !selected[i] || entry.Kind != receivefs.KindDirectory {
 			continue
 		}
@@ -1108,12 +1243,19 @@ func unzipDirectoryFromReaderWithLimit(
 }
 
 func validateZipEntries(files []*zip.File, maxExtractedBytes int64) ([]receivefs.Entry, error) {
+	return validateZipEntriesContext(context.Background(), files, maxExtractedBytes)
+}
+
+func validateZipEntriesContext(ctx context.Context, files []*zip.File, maxExtractedBytes int64) ([]receivefs.Entry, error) {
 	if maxExtractedBytes <= 0 {
 		return nil, fmt.Errorf("maximum extracted size must be positive: %d", maxExtractedBytes)
 	}
 	entries := make([]receivefs.Entry, len(files))
 	remainingDeclaredBytes := uint64(maxExtractedBytes)
 	for i, f := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		kind := receivefs.KindFile
 		if f.FileInfo().IsDir() {
 			kind = receivefs.KindDirectory

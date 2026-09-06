@@ -43,7 +43,11 @@ func RunContext(ctx context.Context) (err error) {
 	// use all of the processors
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	return newApp().RunContext(ctx, os.Args)
+	err = newApp().RunContext(ctx, os.Args)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 func newApp() *cli.App {
@@ -235,7 +239,10 @@ access the shared secret and receive the files instead of the intended
 recipient.
 
 Do you wish to continue to DISABLE the classic mode? (y/N) `, colorEnabled))
-				choice, _ := utils.GetInput("")
+				choice, inputErr := utils.GetInputContext(c.Context, "")
+				if inputErr != nil {
+					return inputErr
+				}
 				choice = strings.ToLower(choice)
 				if choice == "y" || choice == "yes" {
 					os.Remove(classicFile)
@@ -261,7 +268,10 @@ multi-user system, this could allow other local users to access the
 shared secret and receive the files instead of the intended recipient.
 
 Do you wish to continue to enable the classic mode? (y/N) `, colorEnabled))
-				choice, _ := utils.GetInput("")
+				choice, inputErr := utils.GetInputContext(c.Context, "")
+				if inputErr != nil {
+					return inputErr
+				}
 				choice = strings.ToLower(choice)
 				if choice == "y" || choice == "yes" {
 					fmt.Print("\nClassic mode ENABLED.\n\n")
@@ -286,7 +296,7 @@ Do you wish to continue to enable the classic mode? (y/N) `, colorEnabled))
 				fnames = append(fnames, "'"+basename+"'")
 			}
 			promptMessage := fmt.Sprintf("Did you mean to send %s? (Y/n) ", strings.Join(fnames, ", "))
-			choice, errInput := utils.GetInput(promptMessage)
+			choice, errInput := utils.GetInputContext(c.Context, promptMessage)
 			if errInput != nil {
 				return fmt.Errorf("could not read confirmation (use 'croc send' to send without one): %w", errInput)
 			}
@@ -309,7 +319,7 @@ func setDebugLevel(c *cli.Context) {
 		log.SetLevel("debug")
 		log.Debug("debug mode on")
 		// print the public IP address
-		ip, err := utils.PublicIP()
+		ip, err := utils.PublicIPContext(c.Context)
 		if err == nil {
 			log.Debugf("public IP address: %s", ip)
 		} else {
@@ -404,10 +414,10 @@ func assignPublicRelayForCode(options *croc.Options) error {
 	return assignPublicRelay(options, relayIndex)
 }
 
-func selectBestPublicRelay(probe publicrelay.Probe) (int, error) {
+func selectBestPublicRelay(ctx context.Context, probe publicrelay.Probe) (int, error) {
 	relays := publicrelay.Relays()
 	best, duration, err := publicrelay.SelectFirst(
-		context.Background(),
+		ctx,
 		relays,
 		publicrelay.ProbeTimeout,
 		probe,
@@ -468,7 +478,10 @@ func clearBestPublicRelayOnSendError(generatedPublicCode bool, err error) {
 	}
 }
 
-func selectPublicRelay(probe publicrelay.Probe) (int, error) {
+func selectPublicRelay(ctx context.Context, probe publicrelay.Probe) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	relays := publicrelay.Relays()
 	if relayIndex, err := loadBestPublicRelay(relays); err == nil {
 		return relayIndex, nil
@@ -476,8 +489,11 @@ func selectPublicRelay(probe publicrelay.Probe) (int, error) {
 		log.Debugf("ignoring invalid public relay cache: %v", err)
 	}
 
-	relayIndex, err := selectBestPublicRelay(probe)
+	relayIndex, err := selectBestPublicRelay(ctx, probe)
 	if err != nil {
+		return 0, err
+	}
+	if err = ctx.Err(); err != nil {
 		return 0, err
 	}
 	if err = saveBestPublicRelay(relays[relayIndex]); err != nil {
@@ -675,7 +691,7 @@ func send(c *cli.Context) (err error) {
 	var fnames []string
 	stat, _ := os.Stdin.Stat()
 	if ((stat.Mode() & os.ModeCharDevice) == 0) && !c.Bool("ignore-stdin") {
-		fnames, err = getStdin()
+		fnames, err = getStdinContext(c.Context)
 		if err != nil {
 			return
 		}
@@ -731,7 +747,7 @@ Or you can go back to the classic croc behavior by enabling classic mode:
 	if len(crocOptions.SharedSecret) == 0 {
 		if publicRelayMode {
 			var relayIndex int
-			relayIndex, err = selectPublicRelay(tcp.MeasureServerLatencyContext)
+			relayIndex, err = selectPublicRelay(c.Context, tcp.MeasureServerLatencyContext)
 			if err != nil {
 				return err
 			}
@@ -750,7 +766,7 @@ Or you can go back to the classic croc behavior by enabling classic mode:
 			return fmt.Errorf("could not select public relay: %w", err)
 		}
 	}
-	minimalFileInfos, emptyFoldersToTransfer, totalNumberFolders, err := croc.GetFilesInfoWithExactExclusions(fnames, crocOptions.ZipFolder, crocOptions.GitIgnore, crocOptions.Exclude, crocOptions.ExcludeFile)
+	minimalFileInfos, emptyFoldersToTransfer, totalNumberFolders, err := croc.GetFilesInfoWithExactExclusionsContext(c.Context, fnames, crocOptions.ZipFolder, crocOptions.GitIgnore, crocOptions.Exclude, crocOptions.ExcludeFile)
 	if err != nil {
 		return
 	}
@@ -758,6 +774,9 @@ Or you can go back to the classic croc behavior by enabling classic mode:
 		minimalFileInfosInclude := []croc.FileInfo{}
 		emptyFoldersToTransferInclude := []croc.FileInfo{}
 		for _, f := range minimalFileInfos {
+			if err = c.Context.Err(); err != nil {
+				return err
+			}
 			exclude := false
 			for _, exclusion := range crocOptions.Exclude {
 				if strings.Contains(path.Join(strings.ToLower(f.FolderRemote), strings.ToLower(f.Name)), exclusion) {
@@ -770,6 +789,9 @@ Or you can go back to the classic croc behavior by enabling classic mode:
 			}
 		}
 		for _, f := range emptyFoldersToTransfer {
+			if err = c.Context.Err(); err != nil {
+				return err
+			}
 			exclude := false
 			for _, exclusion := range crocOptions.Exclude {
 				if strings.Contains(path.Join(strings.ToLower(f.FolderRemote), strings.ToLower(f.Name)), exclusion) {
@@ -794,7 +816,7 @@ Or you can go back to the classic croc behavior by enabling classic mode:
 		emptyFoldersToTransfer = emptyFoldersToTransferInclude
 	}
 
-	cr, err := croc.New(crocOptions)
+	cr, err := croc.NewCtx(c.Context, crocOptions)
 	if err != nil {
 		return
 	}
@@ -807,19 +829,44 @@ Or you can go back to the classic croc behavior by enabling classic mode:
 }
 
 func getStdin() (fnames []string, err error) {
+	return getStdinContext(context.Background())
+}
+
+func getStdinContext(ctx context.Context) (fnames []string, err error) {
+	return copyStdinContext(ctx, os.Stdin)
+}
+
+func copyStdinContext(ctx context.Context, input io.Reader) (fnames []string, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	f, err := os.CreateTemp(".", "croc-stdin-")
 	if err != nil {
 		return
 	}
-	_, err = io.Copy(f, os.Stdin)
-	if err != nil {
-		return
+	name := f.Name()
+	copyDone := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(f, input)
+		copyDone <- copyErr
+	}()
+	select {
+	case <-ctx.Done():
+		_ = f.Close()
+		_ = os.Remove(name)
+		return nil, ctx.Err()
+	case err = <-copyDone:
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(name)
+			return nil, err
+		}
 	}
-	err = f.Close()
-	if err != nil {
-		return
+	if err = f.Close(); err != nil {
+		_ = os.Remove(name)
+		return nil, err
 	}
-	fnames = []string{f.Name()}
+	fnames = []string{name}
 	return
 }
 
@@ -1029,7 +1076,7 @@ Run croc with no argument and paste the link at the prompt, or use:
 		}
 	}
 	if crocOptions.SharedSecret == "" {
-		crocOptions.SharedSecret, err = utils.GetInput("Enter receive code: ")
+		crocOptions.SharedSecret, err = utils.GetInputContext(c.Context, "Enter receive code: ")
 		if err != nil {
 			return fmt.Errorf("could not read receive code: %w", err)
 		}
@@ -1048,7 +1095,7 @@ Run croc with no argument and paste the link at the prompt, or use:
 		}
 	}
 
-	cr, err := croc.New(crocOptions)
+	cr, err := croc.NewCtx(c.Context, crocOptions)
 	if err != nil {
 		return
 	}
@@ -1186,6 +1233,7 @@ func relay(c *cli.Context) (err error) {
 				tcp.WithHandshakeTimeout(handshakeTimeout),
 				tcp.WithAdmissionLimits(sourceJoinLimit, roomJoinLimit, joinLimitWindow),
 				tcp.WithFastAdmission(capabilitySet),
+				tcp.WithCtx(c.Context),
 			)
 			if err != nil {
 				panic(err)
@@ -1203,6 +1251,7 @@ func relay(c *cli.Context) (err error) {
 		tcp.WithHandshakeTimeout(handshakeTimeout),
 		tcp.WithAdmissionLimits(sourceJoinLimit, roomJoinLimit, joinLimitWindow),
 		tcp.WithFastAdmission(capabilitySet),
+		tcp.WithCtx(c.Context),
 		tcp.WithRoomPairedCallback(roomPaired),
 		tcp.WithRoomProtocolCallback(roomProtocol),
 	)

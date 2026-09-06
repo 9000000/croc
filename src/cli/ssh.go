@@ -61,7 +61,7 @@ func joinSSHSession(c *cli.Context) error {
 	}
 	if secret == "" {
 		var err error
-		secret, err = utils.GetInput("Enter SSH code: ")
+		secret, err = utils.GetInputContext(c.Context, "Enter SSH code: ")
 		if err != nil {
 			return fmt.Errorf("could not read SSH code: %w", err)
 		}

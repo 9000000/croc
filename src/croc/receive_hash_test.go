@@ -1,6 +1,7 @@
 package croc
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -56,7 +57,7 @@ func TestExistingDestinationHashFailureIsFatal(t *testing.T) {
 	}
 	wantErr := errors.New("hash failed")
 	originalHash := receiveFileHash
-	receiveFileHash = func(string, string, ...bool) ([]byte, error) { return nil, wantErr }
+	receiveFileHash = func(context.Context, string, string, ...bool) ([]byte, error) { return nil, wantErr }
 	t.Cleanup(func() { receiveFileHash = originalHash })
 
 	client := &Client{
