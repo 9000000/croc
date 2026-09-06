@@ -228,10 +228,6 @@ export default function SSHPanel({
           </span>
           <div>
             <h2>Join a shared terminal</h2>
-            <p>
-              Paste the invitation printed by a running <code>croc ssh</code>{" "}
-              host.
-            </p>
           </div>
           {role && <span className={`ssh-role ${role}`}>{roleLabel(role)}</span>}
         </div>

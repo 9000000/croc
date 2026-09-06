@@ -102,7 +102,6 @@ import {
   type GitHubRelease,
 } from "./releases";
 import { blogPosts } from "./blog-posts";
-import { TransferLinks } from "./TransferLinks";
 
 type Activity = "idle" | "working" | "done" | "error";
 type Theme = "dark" | "light";
@@ -708,8 +707,8 @@ function BlogTeaser() {
           <p className="eyebrow">Notes &amp; updates</p>
           <h2 id="home-blog-title">What happens after you press Send?</h2>
           <p>
-            Plainspoken notes about the relay, the three-word code, and the ways
-            browsers and terminals meet, plus updates when croc changes.
+            Notes about how croc works, commonly asked questions about croc,
+            and latest information on new updates to croc.
           </p>
         </div>
         <a href="/blog">Read all {blogPosts.length} posts <ArrowRight /></a>
@@ -717,7 +716,6 @@ function BlogTeaser() {
       <div className="home-blog-list">
         {blogPosts.slice(0, 3).map((post) => (
           <a href={`/blog/${post.slug}`} key={post.slug}>
-            <span>{post.number}</span>
             <strong>{post.title}</strong>
             <small>{post.readingMinutes} min read</small>
             <ArrowRight aria-hidden="true" />
@@ -1505,7 +1503,17 @@ export function App() {
                 : "Send files, secured end-to-end."}
           </h1>
         </div>
-        <div className="header-actions">
+      </header>
+
+      <div className="workspace-toolbar" aria-label="Workspace controls">
+        {!receiveOnly && (
+          <WorkspaceSwitch
+            mode={workspaceMode}
+            disabled={sendBusy || receiveBusy || sshActive}
+            onChange={setWorkspaceMode}
+          />
+        )}
+        <div className="workspace-toolbar-actions">
           <button
             className="icon-button"
             type="button"
@@ -1537,6 +1545,7 @@ export function App() {
             className="icon-button theme-toggle"
             type="button"
             aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
             onClick={() =>
               setTheme((current) => (current === "dark" ? "light" : "dark"))
             }
@@ -1544,15 +1553,7 @@ export function App() {
             {theme === "dark" ? <Sun /> : <Moon />}
           </button>
         </div>
-      </header>
-
-      {!receiveOnly && (
-        <WorkspaceSwitch
-          mode={workspaceMode}
-          disabled={sendBusy || receiveBusy || sshActive}
-          onChange={setWorkspaceMode}
-        />
-      )}
+      </div>
 
       {(receiveOnly || workspaceMode === "files") && (
         <section
@@ -2247,8 +2248,6 @@ export function App() {
       <BlogTeaser />
 
       {!receiveOnly && <HomeReviews />}
-
-      <TransferLinks />
 
       <footer className="site-footer">
         <div className="site-footer-links">

@@ -77,6 +77,33 @@ a:focus-visible {
   padding: 52px 0 24px;
 }
 
+.workspace-toolbar {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--foreground);
+  border-right: 1px solid var(--foreground);
+  border-left: 1px solid var(--foreground);
+  padding: 12px;
+  background: var(--background);
+}
+
+.workspace-toolbar .workspace-switch {
+  margin-bottom: 0;
+}
+
+.workspace-toolbar-actions {
+  display: flex;
+  gap: 0;
+  align-items: center;
+  margin-left: auto;
+}
+
+.workspace-toolbar-actions > * + * {
+  border-left: 0;
+}
+
 .donation-banner {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -130,7 +157,7 @@ a:focus-visible {
 
 .site-header {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr;
   gap: 18px;
   align-items: center;
   padding-bottom: 30px;
@@ -190,12 +217,6 @@ h1 {
 .icon-button svg {
   width: 18px;
   height: 18px;
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
 }
 
 .workspace-switch {
@@ -1763,7 +1784,7 @@ a.cli-download-primary:hover {
   display: grid;
   min-width: 0;
   min-height: 118px;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-template-rows: 1fr auto;
   gap: 8px 12px;
   align-items: start;
@@ -1780,7 +1801,6 @@ a.cli-download-primary:hover {
   background: var(--foreground);
 }
 
-.home-blog-list span,
 .home-blog-list small {
   color: var(--muted);
   font-size: 9px;
@@ -1793,17 +1813,15 @@ a.cli-download-primary:hover {
 }
 
 .home-blog-list small {
-  grid-column: 2;
+  grid-column: 1;
 }
 
 .home-blog-list svg {
   grid-row: 1 / -1;
-  grid-column: 3;
+  grid-column: 2;
 }
 
-.home-blog-list a:hover span,
 .home-blog-list a:hover small,
-.home-blog-list a:focus-visible span,
 .home-blog-list a:focus-visible small {
   color: inherit;
 }
@@ -3673,6 +3691,15 @@ a.cli-download-primary:hover {
     padding-bottom: max(24px, env(safe-area-inset-bottom));
   }
 
+  .workspace-toolbar {
+    gap: 12px;
+    padding: 10px;
+  }
+
+  .workspace-toolbar .workspace-switch {
+    width: auto;
+  }
+
   .site-header {
     grid-template-columns: 96px minmax(0, 1fr);
     gap: 12px;
@@ -3705,10 +3732,6 @@ a.cli-download-primary:hover {
     border-top: 0;
     border-left: 1px solid var(--foreground);
     padding: 10px 12px;
-  }
-
-  .header-actions {
-    display: none;
   }
 
   .brand-illustration {
@@ -4003,26 +4026,14 @@ a.cli-download-primary:hover {
     grid-template-columns: 88px minmax(0, 1fr);
   }
 
-  .header-actions {
-    position: absolute;
-    bottom: 18px;
-    left: 0;
-    display: grid;
-    grid-template-columns: repeat(2, 44px);
-    gap: 0;
+  .workspace-toolbar .workspace-switch button {
+    min-width: 52px;
+    padding-right: 8px;
+    padding-left: 8px;
   }
 
-  .header-actions > a {
+  .workspace-toolbar .workspace-switch svg {
     display: none;
-  }
-
-  .header-actions .icon-button {
-    width: 44px;
-    height: 44px;
-  }
-
-  .header-actions .theme-toggle {
-    border-left: 0;
   }
 
   .button-pair,
