@@ -18,7 +18,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/schollz/croc/v11/src/codephrase"
 	"github.com/schollz/croc/v11/src/receivefs"
@@ -39,53 +38,6 @@ func benchmarkHashFile() string {
 	}
 	bigFile()
 	return "bigfile.test"
-}
-
-func TestShortenProgressFilename(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "short basename",
-			input: path.Join("folder", "short.txt"),
-			want:  "short.txt",
-		},
-		{
-			name:  "exactly twenty Unicode characters",
-			input: strings.Repeat("a", 19) + "ä",
-			want:  strings.Repeat("a", 19) + "ä",
-		},
-		{
-			name:  "long ASCII basename",
-			input: strings.Repeat("a", 21),
-			want:  strings.Repeat("a", 20) + "...",
-		},
-		{
-			name:  "umlaut at former byte boundary",
-			input: strings.Repeat("1", 19) + "ä.txt",
-			want:  strings.Repeat("1", 19) + "ä...",
-		},
-		{
-			name:  "multibyte basename from path",
-			input: path.Join("folder", strings.Repeat("界", 21)+".txt"),
-			want:  strings.Repeat("界", 20) + "...",
-		},
-		{
-			name:  "invalid input bytes",
-			input: strings.Repeat("a", 19) + string([]byte{0xc3}) + ".txt",
-			want:  strings.Repeat("a", 19) + "�...",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := shortenProgressFilename(tt.input)
-			assert.Equal(t, tt.want, got)
-			assert.True(t, utf8.ValidString(got))
-		})
-	}
 }
 
 func TestShouldShowHashProgress(t *testing.T) {

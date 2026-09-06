@@ -35,19 +35,28 @@ import (
 
 const NbPinNumbers = 4
 
-const maxProgressFilenameRunes = 20
 const minHashProgressSize int64 = 200 * 1024 * 1024
 
 func shouldShowHashProgress(requested bool, size int64) bool {
 	return requested && size >= minHashProgressSize
 }
 
-func shortenProgressFilename(fname string) string {
-	fnameRunes := []rune(path.Base(fname))
-	if len(fnameRunes) > maxProgressFilenameRunes {
-		return string(fnameRunes[:maxProgressFilenameRunes]) + "..."
+func newFileProgress(action, fname string, size int64) *progressbar.ProgressBar {
+	output, colorEnabled := termui.Output(os.Stderr)
+	return termui.NewProgress(termui.ProgressConfig{
+		Max:           size,
+		Description:   termui.ProgressDescription(action+" ", path.Base(fname), colorEnabled),
+		Writer:        output,
+		ColorEnabled:  colorEnabled,
+		ClearOnFinish: true,
+		Throttle:      100 * time.Millisecond,
+	})
+}
+
+func clearUnfinishedProgress(bar *progressbar.ProgressBar) {
+	if bar != nil && !bar.IsFinished() {
+		_ = bar.Clear()
 	}
-	return string(fnameRunes)
 }
 
 // Get or create home directory
@@ -178,14 +187,8 @@ func HighwayHashFile(fname string, doShowProgress bool) (hashHighway []byte, err
 	}
 	if doShowProgress {
 		stat, _ := f.Stat()
-		fnameShort := shortenProgressFilename(fname)
-		bar := progressbar.NewOptions64(stat.Size(),
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetDescription(fmt.Sprintf("Hashing %s", fnameShort)),
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionFullWidth(),
-		)
+		bar := newFileProgress("Hashing", fname, stat.Size())
+		defer clearUnfinishedProgress(bar)
 		if _, err = io.Copy(io.MultiWriter(h, bar), f); err != nil {
 			return
 		}
@@ -210,14 +213,8 @@ func MD5HashFile(fname string, doShowProgress bool) (hash256 []byte, err error) 
 	h := md5.New()
 	if doShowProgress {
 		stat, _ := f.Stat()
-		fnameShort := shortenProgressFilename(fname)
-		bar := progressbar.NewOptions64(stat.Size(),
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetDescription(fmt.Sprintf("Hashing %s", fnameShort)),
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionFullWidth(),
-		)
+		bar := newFileProgress("Hashing", fname, stat.Size())
+		defer clearUnfinishedProgress(bar)
 		if _, err = io.Copy(io.MultiWriter(h, bar), f); err != nil {
 			return
 		}
@@ -273,14 +270,8 @@ func XXHashFile(fname string, doShowProgress bool) (hash256 []byte, err error) {
 	h := xxhash.New()
 	if doShowProgress {
 		stat, _ := f.Stat()
-		fnameShort := shortenProgressFilename(fname)
-		bar := progressbar.NewOptions64(stat.Size(),
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetDescription(fmt.Sprintf("Hashing %s", fnameShort)),
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionFullWidth(),
-		)
+		bar := newFileProgress("Hashing", fname, stat.Size())
+		defer clearUnfinishedProgress(bar)
 		if _, err = io.Copy(io.MultiWriter(h, bar), f); err != nil {
 			return
 		}
@@ -395,15 +386,8 @@ func MissingChunks(fname string, fsize int64, chunkSize int) (chunkRanges []int6
 	var bar *progressbar.ProgressBar
 	showProgress := fsize > 10*1024*1024
 	if showProgress {
-		fnameShort := shortenProgressFilename(fname)
-		bar = progressbar.NewOptions64(fsize,
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetDescription(fmt.Sprintf("Checking %s", fnameShort)),
-			progressbar.OptionClearOnFinish(),
-			progressbar.OptionFullWidth(),
-			progressbar.OptionThrottle(100*time.Millisecond),
-		)
+		bar = newFileProgress("Checking", fname, fsize)
+		defer clearUnfinishedProgress(bar)
 	}
 
 	buffer := make([]byte, chunkSize)

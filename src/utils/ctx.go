@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/minio/highwayhash"
@@ -125,30 +124,12 @@ func HashFileCtx(ctx context.Context, fname string, algorithm string, showProgre
 	// Create progress bar based on algorithm
 	var bar *progressbar.ProgressBar
 	if shouldShowHashProgress(doShowProgress, fi.Size()) {
-		fnameShort := shortenProgressFilename(fname)
-
 		if algorithm == "imohash" || algorithm == "imohash-v2" {
-			// Spinner for imohash (indeterminate progress, max = -1)
-			bar = progressbar.NewOptions64(-1,
-				progressbar.OptionSetWriter(os.Stderr),
-				progressbar.OptionShowBytes(false),
-				progressbar.OptionSetDescription(fmt.Sprintf("Sampling %s", fnameShort)),
-				progressbar.OptionClearOnFinish(),
-				progressbar.OptionFullWidth(),
-				progressbar.OptionShowElapsedTimeOnFinish(),
-				progressbar.OptionSpinnerType(14),
-				progressbar.OptionSetSpinnerChangeInterval(100*time.Millisecond),
-			)
+			bar = newFileProgress("Sampling", fname, -1)
 		} else {
-			// Regular progress bar for other algorithms
-			bar = progressbar.NewOptions64(fi.Size(),
-				progressbar.OptionSetWriter(os.Stderr),
-				progressbar.OptionShowBytes(true),
-				progressbar.OptionSetDescription(fmt.Sprintf("Hashing %s", fnameShort)),
-				progressbar.OptionClearOnFinish(),
-				progressbar.OptionFullWidth(),
-			)
+			bar = newFileProgress("Hashing", fname, fi.Size())
 		}
+		defer clearUnfinishedProgress(bar)
 	}
 
 	// Dispatch to appropriate hash function

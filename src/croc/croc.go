@@ -33,7 +33,6 @@ import (
 	"github.com/schollz/peerdiscovery"
 	"github.com/schollz/progressbar/v3"
 	"github.com/skip2/go-qrcode"
-	"golang.org/x/term"
 	"golang.org/x/time/rate"
 
 	"github.com/schollz/croc/v11/src/codephrase"
@@ -3149,35 +3148,7 @@ func (c *Client) recipientGetFileReady(finished bool) (err error) {
 }
 
 func formatDescription(description string) string {
-	const (
-		// Reserve extra room for variable progress metadata such as [elapsed:remaining].
-		progressMetaWidth = 78
-		minDescription    = 12
-		defaultTermWidth  = 80
-	)
-
-	width, _, err := term.GetSize(int(os.Stderr.Fd()))
-	if err != nil || width <= 0 {
-		width, _, err = term.GetSize(int(os.Stdout.Fd()))
-	}
-	if err != nil || width <= 0 {
-		if envColumns, convErr := strconv.Atoi(os.Getenv("COLUMNS")); convErr == nil && envColumns > 0 {
-			width = envColumns
-		} else {
-			width = defaultTermWidth
-		}
-	}
-
-	maxDescription := max(width-progressMetaWidth, minDescription)
-
-	runes := []rune(description)
-	if len(runes) > maxDescription {
-		if maxDescription <= 3 {
-			return string(runes[:maxDescription])
-		}
-		return string(runes[:maxDescription-3]) + "..."
-	}
-	return description
+	return termui.FitProgressDescription(description)
 }
 
 func (c *Client) createEmptyFileAndFinish(fileInfo FileInfo, i int) (err error) {

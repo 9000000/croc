@@ -20,6 +20,7 @@ import (
 	"github.com/schollz/croc/v11/src/storecrypto"
 	"github.com/schollz/croc/v11/src/termui"
 	"github.com/schollz/croc/v11/src/utils"
+	"github.com/schollz/progressbar/v3"
 )
 
 type storeReceipt struct {
@@ -121,30 +122,42 @@ func removeStoreReceipt(id string) error {
 	return writeStoreReceipts(filtered)
 }
 
-func storedCallbacks(quiet bool) storeclient.Callbacks {
+func storedCallbacks(quiet bool, operation string) storeclient.Callbacks {
 	output, colorEnabled := termui.Output(os.Stderr)
-	return newStyledStoredCallbacks(output, quiet, colorEnabled)
+	return newStyledStoredCallbacks(output, quiet, colorEnabled, operation)
 }
 
-func newStoredCallbacks(output io.Writer, quiet bool) storeclient.Callbacks {
-	return newStyledStoredCallbacks(output, quiet, false)
+func newStoredCallbacks(output io.Writer, quiet bool, operation string) storeclient.Callbacks {
+	return newStyledStoredCallbacks(output, quiet, false, operation)
 }
 
-func newStyledStoredCallbacks(output io.Writer, quiet, colorEnabled bool) storeclient.Callbacks {
+func newStyledStoredCallbacks(output io.Writer, quiet, colorEnabled bool, operation string) storeclient.Callbacks {
 	lastStatus := ""
 	lineWidth := 0
+	var bar *progressbar.ProgressBar
+	progressFinished := false
+
+	clearLine := func() {
+		if lineWidth == 0 {
+			return
+		}
+		fmt.Fprintf(output, "\r%s\r", strings.Repeat(" ", lineWidth))
+		lineWidth = 0
+	}
 	render := func(value string) {
-		if lineWidth > 0 {
-			fmt.Fprintf(output, "\r%s\r", strings.Repeat(" ", lineWidth))
-		} else {
+		if lineWidth == 0 {
 			fmt.Fprint(output, "\r")
 		}
+		clearLine()
 		fmt.Fprint(output, value)
 		lineWidth = uniseg.StringWidth(termui.Plain(value))
 	}
 	return storeclient.Callbacks{
 		Status: func(value string) {
 			if quiet || value == lastStatus {
+				return
+			}
+			if bar != nil && !progressFinished && strings.HasPrefix(value, operation+" ") {
 				return
 			}
 			lastStatus = value
@@ -154,18 +167,29 @@ func newStyledStoredCallbacks(output io.Writer, quiet, colorEnabled bool) storec
 			if quiet || value.TotalSize == 0 {
 				return
 			}
-			percent := float64(value.TotalBytes) / float64(value.TotalSize) * 100
-			progressStyle := termui.Cyan
-			if value.TotalBytes >= value.TotalSize {
-				progressStyle = termui.Green
+			if bar == nil {
+				clearLine()
+				progressName := fmt.Sprintf("%d files", value.FileCount)
+				if value.FileCount == 1 {
+					progressName = value.FileName
+				}
+				description := termui.ProgressDescription(operation+" ", progressName, colorEnabled)
+				bar = termui.NewProgress(termui.ProgressConfig{
+					Max:          value.TotalSize,
+					Description:  description,
+					Writer:       output,
+					ColorEnabled: colorEnabled,
+					Throttle:     100 * time.Millisecond,
+					OnCompletion: func() {
+						progressFinished = true
+						fmt.Fprintln(output)
+					},
+				})
 			}
-			render(fmt.Sprintf(
-				"%s — %s (%s / %s)",
-				termui.Filename(value.FileName, colorEnabled),
-				termui.Color(fmt.Sprintf("%.1f%%", percent), progressStyle, colorEnabled),
-				utils.ByteCountDecimal(value.TotalBytes),
-				utils.ByteCountDecimal(value.TotalSize),
-			))
+
+			current := max(value.TotalBytes, 0)
+			current = min(current, value.TotalSize)
+			_ = bar.Set64(current)
 		},
 	}
 }
@@ -247,7 +271,7 @@ func sendStored(c *cli.Context) error {
 		strings.TrimSpace(c.String("store-url")),
 		paths,
 		storeclient.UploadOptions{Downloads: downloads, Expiration: expiration},
-		storedCallbacks(c.Bool("quiet")),
+		storedCallbacks(c.Bool("quiet"), "Uploading"),
 	)
 	if !c.Bool("quiet") {
 		fmt.Fprintln(os.Stderr)
@@ -362,7 +386,7 @@ func receiveStored(c *cli.Context, value string) error {
 		share,
 		manifest,
 		output,
-		storedCallbacks(c.Bool("quiet")),
+		storedCallbacks(c.Bool("quiet"), "Downloading"),
 	)
 	if !c.Bool("quiet") {
 		fmt.Fprintln(os.Stderr)
